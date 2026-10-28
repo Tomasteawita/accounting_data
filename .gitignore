@@ -1,0 +1,95 @@
+# ==========================================
+# Variables de Entorno (Environment Variables)
+# ==========================================
+.env
+.env.*
+*.env
+!.env.example
+!.env.template
+
+# ==========================================
+# Credenciales y Secretos (Credentials & Secrets)
+# ==========================================
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+*.keystore
+*.token
+auth.json
+credentials.json
+client_secret*.json
+service-account*.json
+google-credentials*.json
+secrets/
+credentials/
+.aws/
+.ssh/
+
+# Claves SSH privadas y públicas locales
+id_rsa*
+id_ed25519*
+
+# ==========================================
+# Volúmenes y Datos de Docker (Docker Volumes)
+# ==========================================
+# Ignorar toda la data dentro de los volúmenes pero preservar los archivos .gitkeep
+volumes/*/*
+!volumes/**/.gitkeep
+
+# En caso de que se creen datos directamente en la raíz de volumes/
+volumes/*
+!volumes/*/
+
+# Archivos de volcado de base de datos
+*.dump
+*.sql
+
+
+# ==========================================
+# Archivos de Python / Django / Sistema
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+ENV/
+
+# Bases de datos locales SQLite
+*.sqlite3
+*.db
+
+# Archivos estáticos y de medios locales (fuera de Docker)
+staticfiles/
+media/
+
+# Logs y overrides de docker
+*.log
+docker-compose.override.yml
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
