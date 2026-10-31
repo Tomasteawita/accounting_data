@@ -2,5 +2,5 @@ from django.shortcuts import render
 
 
 def home(request):
-    """Renderiza la vista raíz (Home) vacía bajo los lineamientos visuales del sistema."""
+    """Renderiza la Landing Page (app/home.html) directamente sin realizar consultas a PostgreSQL."""
     return render(request, "app/home.html")

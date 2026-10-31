@@ -90,6 +90,10 @@ USE_TZ = True
 # Archivos estáticos
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_FINDERS = [
+    "django.contrib.staticfiles.finders.FileSystemFinder",
+    "django.contrib.staticfiles.finders.AppDirectoriesFinder",
+]
 
 # Límites de carga en memoria (alineados con los 5MB de Nginx y 2GB RAM)
 DATA_UPLOAD_MAX_MEMORY_SIZE = 5242880  # 5 MB

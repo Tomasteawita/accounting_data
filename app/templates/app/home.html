@@ -1,65 +1,82 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sistema Contable — Inicio</title>
-    <style>
-        :root {
-            --bg-primary: #F8F9FA;
-            --bg-surface: #F2F2F2;
-            --text-primary: #1A1A1A;
-            --text-secondary: #4D4D4D;
-            --border-color: #E0E0E0;
-        }
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-        body {
-            background-color: var(--bg-primary);
-            color: var(--text-primary);
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-            line-height: 1.5;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
-        header {
-            border-bottom: 1px solid var(--border-color);
-            padding: 1rem 2rem;
-            background-color: var(--bg-surface);
-        }
-        header h1 {
-            font-size: 0.95rem;
-            font-weight: 600;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-        }
-        main {
-            flex: 1;
-            padding: 2rem;
-        }
-        .status-box {
-            border: 1px solid var(--border-color);
-            padding: 1.5rem;
-            max-width: 640px;
-        }
-        .status-box p {
-            color: var(--text-secondary);
-            font-size: 0.875rem;
-        }
-    </style>
-</head>
-<body>
-    <header>
-        <h1>Accounting Data</h1>
-    </header>
-    <main>
-        <section class="status-box">
-            <p>Sistema operativo. Sin registros cargados en la vista actual.</p>
-        </section>
-    </main>
-</body>
-</html>
+{% extends "app/base.html" %}
+
+{% block content %}
+<article class="ledger-sheet">
+    <!-- Sección 1: Hero Section -->
+    <section class="ledger-section hero-section">
+        <h1 class="hero-title">Gastarte toda la plata de tu negocio en comprar materiales y maquinas para <u class="hero-underline">"atender a más clientes"</u> es la principal razón por la cual te vas a fundir.</h1>
+    </section>
+
+    <!-- Sección 2: Diagnóstico de Síntomas -->
+    <section class="ledger-section diagnosis-section">
+        <p class="section-intro">Si te gastas la plata en tu negocio para """poner la plata en movimiento""" pero te están pasando estas tres cosas:</p>
+
+        <ol class="audit-list">
+            <li class="audit-cell">
+                <span class="item-index">a.</span>
+                <p class="item-text">Tenes +100 clientes por mes pero <strong>no vez reflejado el crecimiento en tu cuenta bancaria</strong>.</p>
+            </li>
+            <li class="audit-cell">
+                <span class="item-index">b.</span>
+                <p class="item-text">Un mes te va bien y al otro tenes que <strong>pagar todo en cuotas o con un prestamo</strong>.</p>
+            </li>
+            <li class="audit-cell">
+                <span class="item-index">c.</span>
+                <p class="item-text">No tenes ahorros y cualquier gasto inesperado te obliga a <strong>endeudarte</strong>.</p>
+            </li>
+        </ol>
+
+        <p class="audit-callout">Estás perdiendo plata de a poco y no te estás dando cuenta.</p>
+    </section>
+
+    <!-- Sección 3: El Sistema: "El ahorro es primero" -->
+    <section class="ledger-section system-section">
+        <span class="section-tag">[ EL SISTEMA: "EL AHORRO ES PRIMERO" ]</span>
+        <h2 class="section-heading">Por eso diseñe un sistema financiero para:</h2>
+
+        <ol class="pillars-grid">
+            <li class="pillar-card">
+                <span class="item-index">a.</span>
+                <p class="item-text">Que <strong>ganes más plata con la misma cantidad de ventas</strong> reduciendo tus costos;</p>
+            </li>
+            <li class="pillar-card">
+                <span class="item-index">b.</span>
+                <p class="item-text"><strong>Ahorres todos los meses</strong> construyendo el colchón financiero que necesitas para tu tranquilidad;</p>
+            </li>
+            <li class="pillar-card">
+                <span class="item-index">c.</span>
+                <p class="item-text">Planifiques tu año para que los meses más complicados sepas <strong>cuanto es lo mínimo que necesitas vender para cubrir todos los gastos de tu negocio</strong>;</p>
+            </li>
+        </ol>
+    </section>
+
+    <!-- Sección 4: Casos de exito -->
+    <section class="ledger-section cases-section">
+        <h2 class="section-heading">Casos de exito</h2>
+        <div class="video-container">
+            <iframe 
+                src="https://www.youtube-nocookie.com/embed/4h_RZRdgGh4" 
+                title="Casos de exito - Tomas Cueva" 
+                loading="lazy"
+                frameborder="0" 
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
+                referrerpolicy="strict-origin-when-cross-origin" 
+                allowfullscreen>
+            </iframe>
+        </div>
+    </section>
+
+    <!-- Sección 5: Cierre y Llamado a la Acción (CTA) -->
+    <section class="ledger-section cta-section">
+        <p class="cta-copy">Hacé el click al botón de registro para que con 5 minutos al día consigas tener tus finanzas en orden y puedas dormir tranquilo por las noches</p>
+
+        <div class="cta-actions">
+            <a href="#" class="btn-primary">Registrarme</a>
+            <div class="whatsapp-support">
+                <span>Soporte por WhatsApp: </span>
+                <a href="https://wa.me/5491123966199" target="_blank" rel="noopener noreferrer" class="btn-outline">11 2396-6199</a>
+            </div>
+        </div>
+    </section>
+</article>
+{% endblock %}
