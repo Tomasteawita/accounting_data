@@ -1,0 +1,23 @@
+{% extends "app/base.html" %}
+
+{% block title %}Enlace de Activación Inválido — Tomas Cueva{% endblock %}
+
+{% block content %}
+<div class="auth-wrapper">
+    <section class="auth-card" aria-labelledby="verify-invalid-title">
+        <header class="auth-header">
+            <h1 id="verify-invalid-title" class="auth-title">Enlace de Activación Inválido</h1>
+            <p class="auth-subtitle">No fue posible verificar la cuenta.</p>
+        </header>
+
+        <div class="alert-stoic" role="alert">
+            El enlace de confirmación utilizado es inválido, ya fue empleado anteriormente o ha expirado.
+        </div>
+
+        <div class="auth-actions">
+            <a href="{% url 'app:resend_activation' %}" class="btn-primary">Solicitar Nuevo Enlace</a>
+            <a href="{% url 'app:login' %}" class="btn-secondary">Volver a Iniciar Sesión</a>
+        </div>
+    </section>
+</div>
+{% endblock %}

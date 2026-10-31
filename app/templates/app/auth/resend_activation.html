@@ -1,0 +1,46 @@
+{% extends "app/base.html" %}
+
+{% block title %}Reenviar Activación — Tomas Cueva{% endblock %}
+
+{% block content %}
+<div class="auth-wrapper">
+    <section class="auth-card" aria-labelledby="resend-title">
+        <header class="auth-header">
+            <h1 id="resend-title" class="auth-title">Reenviar Enlace de Activación</h1>
+            <p class="auth-subtitle">Ingrese su correo electrónico para recibir un nuevo enlace de confirmación.</p>
+        </header>
+
+        {% if form.non_field_errors %}
+            {% for error in form.non_field_errors %}
+                <div class="alert-stoic" role="alert">{{ error }}</div>
+            {% endfor %}
+        {% endif %}
+
+        <form method="post" action="{% url 'app:resend_activation' %}" class="auth-form" novalidate>
+            {% csrf_token %}
+
+            {% for field in form %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">{{ field.label }}</label>
+                    {{ field }}
+                    {% if field.errors %}
+                        <ul class="field-error-list">
+                            {% for error in field.errors %}
+                                <li class="field-error-item">{{ error }}</li>
+                            {% endfor %}
+                        </ul>
+                    {% endif %}
+                </div>
+            {% endfor %}
+
+            <div class="auth-actions">
+                <button type="submit" class="btn-primary">Enviar Enlace de Activación</button>
+            </div>
+        </form>
+
+        <footer class="auth-footer">
+            <p><a href="{% url 'app:login' %}" class="auth-link">Volver a Iniciar Sesión</a></p>
+        </footer>
+    </section>
+</div>
+{% endblock %}

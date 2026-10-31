@@ -10,14 +10,31 @@
 <body>
     <header class="site-header">
         <div class="header-inner container">
-            <span class="brand-name">Tomas Cueva</span>
-            <nav aria-label="Acceso de usuario">
-                <a href="#" class="btn-outline">Iniciar sesión</a>
+            <a href="{% url 'app:home' %}" class="brand-name">Tomas Cueva</a>
+            <nav class="header-nav" aria-label="Acceso de usuario">
+                {% if user.is_authenticated %}
+                    <span class="header-user-email">{{ user.email }}</span>
+                    <form method="post" action="{% url 'app:logout' %}" class="header-logout-form">
+                        {% csrf_token %}
+                        <button type="submit" class="btn-secondary">Cerrar Sesión</button>
+                    </form>
+                {% else %}
+                    <a href="{% url 'app:login' %}" class="btn-outline">Iniciar Sesión</a>
+                    <a href="{% url 'app:register' %}" class="btn-primary">Registrarse</a>
+                {% endif %}
             </nav>
         </div>
     </header>
 
     <main class="main-ledger container">
+        {% if messages %}
+            <section class="messages-container" aria-label="Notificaciones del sistema">
+                {% for message in messages %}
+                    <div class="alert-stoic" role="status">{{ message }}</div>
+                {% endfor %}
+            </section>
+        {% endif %}
+
         {% block content %}{% endblock %}
     </main>
 </body>

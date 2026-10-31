@@ -1,0 +1,60 @@
+{% extends "app/base.html" %}
+
+{% block title %}Iniciar Sesión — Tomas Cueva{% endblock %}
+
+{% block content %}
+<div class="auth-wrapper">
+    <section class="auth-card" aria-labelledby="login-title">
+        <header class="auth-header">
+            <h1 id="login-title" class="auth-title">Iniciar Sesión</h1>
+            <p class="auth-subtitle">Ingrese sus credenciales para acceder al sistema financiero.</p>
+        </header>
+
+        {% if form.non_field_errors %}
+            {% for error in form.non_field_errors %}
+                <div class="alert-stoic" role="alert">
+                    <p>{{ error }}</p>
+                    {% if form.has_inactive_error %}
+                        <p style="margin-top: 0.5rem;">
+                            <a href="{% url 'app:resend_activation' %}{% if form.username.value %}?email={{ form.username.value|urlencode }}{% endif %}">
+                                Reenviar correo de activación
+                            </a>
+                        </p>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        {% endif %}
+
+        <form method="post" action="{% url 'app:login' %}" class="auth-form" novalidate>
+            {% csrf_token %}
+            {% if next %}
+                <input type="hidden" name="next" value="{{ next }}">
+            {% endif %}
+
+            {% for field in form %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">{{ field.label }}</label>
+                    {{ field }}
+                    {% if field.errors %}
+                        <ul class="field-error-list">
+                            {% for error in field.errors %}
+                                <li class="field-error-item">{{ error }}</li>
+                            {% endfor %}
+                        </ul>
+                    {% endif %}
+                </div>
+            {% endfor %}
+
+            <div class="auth-actions">
+                <button type="submit" class="btn-primary">Iniciar Sesión</button>
+            </div>
+        </form>
+
+        <footer class="auth-footer">
+            <p><a href="{% url 'app:password_reset' %}" class="auth-link">¿Olvidó su contraseña?</a></p>
+            <p>¿No posee una cuenta? <a href="{% url 'app:register' %}" class="auth-link">Registrarse</a></p>
+            <p>¿No recibió el enlace de activación? <a href="{% url 'app:resend_activation' %}" class="auth-link">Reenviar activación</a></p>
+        </footer>
+    </section>
+</div>
+{% endblock %}

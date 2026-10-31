@@ -1,0 +1,23 @@
+{% extends "app/base.html" %}
+
+{% block title %}Verificación de Correo Enviada — Tomas Cueva{% endblock %}
+
+{% block content %}
+<div class="auth-wrapper">
+    <section class="auth-card" aria-labelledby="verify-sent-title">
+        <header class="auth-header">
+            <h1 id="verify-sent-title" class="auth-title">Verifique su Correo Electrónico</h1>
+            <p class="auth-subtitle">Activación de cuenta pendiente.</p>
+        </header>
+
+        <div class="alert-stoic" role="status">
+            Si la dirección proporcionada corresponde a una cuenta pendiente de activación, hemos enviado un enlace de confirmación a su bandeja de entrada. Revise también la carpeta de correo no deseado.
+        </div>
+
+        <div class="auth-actions">
+            <a href="{% url 'app:login' %}" class="btn-primary">Ir a Iniciar Sesión</a>
+            <a href="{% url 'app:resend_activation' %}" class="btn-secondary">Reenviar Enlace de Activación</a>
+        </div>
+    </section>
+</div>
+{% endblock %}

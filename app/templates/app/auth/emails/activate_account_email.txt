@@ -1,0 +1,10 @@
+Sistema Financiero — Tomas Cueva
+================================
+
+Se ha registrado una solicitud de alta para la cuenta asociada a {{ user.email }}.
+
+Para confirmar su correo electrónico y activar su cuenta, ingrese al siguiente enlace:
+
+{{ activation_url }}
+
+Si usted no solicitó este registro, puede desestimar este mensaje.

@@ -4,6 +4,7 @@ Optimizado para instancia AWS EC2 t4g.small (ARM64, 2GB RAM).
 """
 
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -15,6 +16,8 @@ load_dotenv(BASE_DIR / ".env")
 SECRET_KEY = os.environ.get("SECRET_KEY", "clave-insegura-solo-desarrollo-local")
 
 DEBUG = os.environ.get("DEBUG", "False").strip().lower() in ("true", "1", "yes")
+
+TESTING = "test" in sys.argv
 
 ALLOWED_HOSTS = [
     host.strip()
@@ -75,12 +78,46 @@ DATABASES = {
     }
 }
 
+# Caché en memoria ligera para control de tasa (rate-limiting) sin dependencias externas
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "accounting-data-locmem",
+        "OPTIONS": {
+            "MAX_ENTRIES": 1000,
+        },
+    }
+}
+
+# Modelo de Usuario Personalizado y Redirecciones de Autenticación
+AUTH_USER_MODEL = "app.CustomUser"
+LOGIN_URL = "app:login"
+LOGIN_REDIRECT_URL = "app:home"
+LOGOUT_REDIRECT_URL = "app:login"
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
+
+# Configuración de Correo Electrónico
+EMAIL_BACKEND = os.environ.get(
+    "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
+)
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "True").strip().lower() in (
+    "true",
+    "1",
+    "yes",
+)
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+DEFAULT_FROM_EMAIL = os.environ.get(
+    "DEFAULT_FROM_EMAIL", "sistema@accountingdata.local"
+)
 
 LANGUAGE_CODE = "es-ar"
 TIME_ZONE = "UTC"

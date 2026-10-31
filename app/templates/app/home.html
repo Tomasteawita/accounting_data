@@ -71,7 +71,11 @@
         <p class="cta-copy">Hacé el click al botón de registro para que con 5 minutos al día consigas tener tus finanzas en orden y puedas dormir tranquilo por las noches</p>
 
         <div class="cta-actions">
-            <a href="#" class="btn-primary">Registrarme</a>
+            {% if not user.is_authenticated %}
+                <a href="{% url 'app:register' %}" class="btn-primary">Registrarme</a>
+            {% else %}
+                <span class="header-user-email">Sesión activa: {{ user.email }}</span>
+            {% endif %}
             <div class="whatsapp-support">
                 <span>Soporte por WhatsApp: </span>
                 <a href="https://wa.me/5491123966199" target="_blank" rel="noopener noreferrer" class="btn-outline">11 2396-6199</a>
