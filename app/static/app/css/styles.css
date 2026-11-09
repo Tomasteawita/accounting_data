@@ -539,6 +539,195 @@ body {
 }
 
 /* ==========================================================================
+   6. App Shell y Navegación Interna (Mobile Drawer Izq->Der / Desktop Sidebar)
+   ========================================================================== */
+.app-shell {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    width: 100%;
+    background-color: var(--bg-primary);
+}
+
+/* Barra superior exclusiva para Mobile (< 768px) */
+.app-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 1rem;
+    background-color: var(--bg-surface-white);
+    border-bottom: 1px solid var(--border-tech);
+    width: 100%;
+}
+
+.app-menu-btn,
+.app-close-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    padding: 0.5rem 0.875rem;
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    background-color: var(--bg-surface-white);
+    border: 1px solid var(--border-accent);
+    border-radius: 2px;
+    cursor: pointer;
+}
+
+.app-menu-btn:hover,
+.app-menu-btn:focus-visible,
+.app-close-btn:hover,
+.app-close-btn:focus-visible {
+    background-color: var(--bg-surface-subtle);
+    outline: none;
+}
+
+.app-close-btn {
+    min-width: 44px;
+    font-size: 1.25rem;
+    line-height: 1;
+    padding: 0.25rem 0.625rem;
+}
+
+/* Overlay acromático Mobile */
+.app-backdrop {
+    position: fixed;
+    inset: 0;
+    background-color: rgba(17, 24, 39, 0.45);
+    z-index: 999;
+    display: none;
+}
+
+.app-backdrop.is-open {
+    display: block;
+}
+
+/* Panel de navegación: Desplegable de izquierda a derecha en Mobile */
+.app-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 260px;
+    max-width: 82vw;
+    background-color: var(--bg-surface-white);
+    border-right: 1px solid var(--border-accent);
+    display: flex;
+    flex-direction: column;
+    z-index: 1000;
+    transform: translateX(-100%);
+    transition: transform 0.18s ease-out;
+}
+
+.app-sidebar.is-open {
+    transform: translateX(0);
+}
+
+.app-sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.875rem 1.25rem;
+    border-bottom: 1px solid var(--border-tech);
+}
+
+.app-nav {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.app-nav-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+}
+
+.app-nav-item {
+    border-bottom: 1px solid var(--border-soft);
+}
+
+.app-nav-link {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0.75rem 1.25rem;
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-left: 3px solid transparent;
+}
+
+.app-nav-link:hover,
+.app-nav-link:focus-visible {
+    background-color: var(--bg-surface-subtle);
+    color: var(--text-primary);
+    outline: none;
+}
+
+.app-nav-link--active {
+    background-color: var(--bg-surface-subtle);
+    color: var(--text-primary);
+    font-weight: 700;
+    border-left-color: var(--border-accent);
+}
+
+.app-sidebar-footer {
+    margin-top: auto;
+    padding: 1rem 1.25rem;
+    border-top: 1px solid var(--border-tech);
+    background-color: var(--bg-primary);
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.app-user-email {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    word-break: break-all;
+}
+
+.app-logout-form {
+    margin: 0;
+    width: 100%;
+}
+
+.app-logout-form .btn-secondary {
+    width: 100%;
+    font-size: 0.875rem;
+    padding: 0.5rem 0.875rem;
+}
+
+/* Lienzo principal en blanco */
+.app-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 1.25rem 1rem;
+    background-color: var(--bg-primary);
+}
+
+.app-canvas {
+    flex: 1;
+    width: 100%;
+    min-height: calc(100vh - 6rem);
+}
+
+.blank-workspace {
+    width: 100%;
+    min-height: 100%;
+}
+
+/* ==========================================================================
    Media Queries — Escalado a Tablet / Desktop (>= 768px)
    ========================================================================== */
 @media (min-width: 768px) {
@@ -619,5 +808,37 @@ body {
 
     .whatsapp-support .btn-outline {
         width: auto;
+    }
+
+    /* App Shell en Desktop: Barra Lateral Fija a la Izquierda */
+    .app-shell {
+        display: grid;
+        grid-template-columns: 240px 1fr;
+    }
+
+    .app-topbar,
+    .app-backdrop,
+    .app-close-btn {
+        display: none !important;
+    }
+
+    .app-sidebar {
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        width: 240px;
+        max-width: none;
+        transform: none;
+        transition: none;
+        border-right: 1px solid var(--border-tech);
+        z-index: auto;
+    }
+
+    .app-sidebar-header {
+        padding: 1.25rem;
+    }
+
+    .app-main {
+        padding: 2rem 2.5rem;
     }
 }

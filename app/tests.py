@@ -225,7 +225,7 @@ class LoginAndLogoutFlowTests(TestCase):
             {"username": "  CLIENTE@Empresa.com ", "password": self.password},
             follow=True,
         )
-        self.assertRedirects(response, reverse("app:home"))
+        self.assertRedirects(response, reverse("app:dashboard"))
         self.assertContains(response, self.email)
         self.assertContains(response, "Cerrar Sesión")
 
@@ -365,3 +365,83 @@ class PasswordResetFlowTests(TestCase):
         # Verificar que la contraseña se actualizó en la base de datos
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password(self.new_password))
+
+
+class DashboardAndNavigationTests(TestCase):
+    """
+    7. Pruebas para el módulo Dashboard y la navegación por las interfaces de la App
+       (Inicio / Dashboard, Clientes, Transacciones, Métricas).
+    """
+
+    def setUp(self):
+        self.email = "operador@empresa.com"
+        self.password = "ContrasenaFuerte2026!"
+        self.user = CustomUser.objects.create_user(
+            email=self.email,
+            password=self.password,
+            is_active=True,
+        )
+        self.app_routes = [
+            ("app:dashboard", "app/dashboard.html", "Inicio"),
+            ("app:clients", "app/clients.html", "Clientes"),
+            ("app:transactions", "app/transactions.html", "Transacciones"),
+            ("app:metrics", "app/metrics.html", "Métricas"),
+        ]
+
+    def test_anonymous_users_are_redirected_to_login(self):
+        for route_name, _, _ in self.app_routes:
+            url = reverse(route_name)
+            response = self.client.get(url)
+            self.assertRedirects(
+                response, f"{reverse('app:login')}?next={url}"
+            )
+
+    def test_authenticated_user_automatically_enters_dashboard_from_public_entrypoints(
+        self,
+    ):
+        self.client.force_login(self.user)
+
+        # Acceso a la raíz '/' con sesión activa redirige al Dashboard
+        response_home = self.client.get(reverse("app:home"))
+        self.assertRedirects(response_home, reverse("app:dashboard"))
+
+        # Acceso a '/auth/login/' con sesión activa redirige al Dashboard
+        response_login = self.client.get(reverse("app:login"))
+        self.assertRedirects(response_login, reverse("app:dashboard"))
+
+        # Acceso a '/auth/register/' con sesión activa redirige al Dashboard
+        response_register = self.client.get(reverse("app:register"))
+        self.assertRedirects(response_register, reverse("app:dashboard"))
+
+    def test_authenticated_navigation_and_blank_interfaces(self):
+        self.client.force_login(self.user)
+
+        for route_name, expected_template, label in self.app_routes:
+            url = reverse(route_name)
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200)
+            self.assertTemplateUsed(response, "app/app_base.html")
+            self.assertTemplateUsed(response, expected_template)
+
+            # Verificar presencia de los 4 ítems del menú y controles del drawer/sidebar
+            self.assertContains(response, 'id="app-sidebar"')
+            self.assertContains(response, 'id="sidebar-toggle"')
+            self.assertContains(response, 'id="sidebar-close"')
+            self.assertContains(response, 'id="sidebar-backdrop"')
+            self.assertContains(response, reverse("app:dashboard"))
+            self.assertContains(response, reverse("app:clients"))
+            self.assertContains(response, reverse("app:transactions"))
+            self.assertContains(response, reverse("app:metrics"))
+            self.assertContains(response, "Inicio")
+            self.assertContains(response, "Clientes")
+            self.assertContains(response, "Transacciones")
+            self.assertContains(response, "Métricas")
+
+            # Verificar que el ítem activo corresponde a la interfaz actual
+            self.assertContains(response, 'aria-current="page"', count=1)
+            self.assertContains(response, "app-nav-link--active", count=1)
+            self.assertContains(
+                response,
+                f'<section class="blank-workspace" aria-label="{label}"></section>',
+                html=True,
+            )

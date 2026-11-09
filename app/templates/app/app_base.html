@@ -1,0 +1,155 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Tomas Cueva — Sistema Financiero{% endblock %}</title>
+    <link rel="stylesheet" href="{% static 'app/css/styles.css' %}">
+</head>
+<body class="app-body">
+    <div class="app-shell">
+        <!-- Barra Superior Mobile (< 768px) -->
+        <header class="app-topbar">
+            <button
+                type="button"
+                id="sidebar-toggle"
+                class="app-menu-btn"
+                aria-label="Abrir menú de navegación"
+                aria-expanded="false"
+                aria-controls="app-sidebar">
+                &#9776; MENÚ
+            </button>
+            <a href="{% url 'app:dashboard' %}" class="brand-name">Tomas Cueva</a>
+        </header>
+
+        <!-- Backdrop Acromático Mobile -->
+        <div id="sidebar-backdrop" class="app-backdrop" aria-hidden="true"></div>
+
+        <!-- Menú de Navegación (Drawer Izquierda->Derecha en Mobile / Barra Lateral en Desktop) -->
+        <aside id="app-sidebar" class="app-sidebar" aria-label="Panel lateral de navegación">
+            <div class="app-sidebar-header">
+                <a href="{% url 'app:dashboard' %}" class="brand-name">Tomas Cueva</a>
+                <button
+                    type="button"
+                    id="sidebar-close"
+                    class="app-close-btn"
+                    aria-label="Cerrar menú de navegación">
+                    &times;
+                </button>
+            </div>
+
+            <nav class="app-nav" aria-label="Menú principal">
+                {% with current_url=request.resolver_match.url_name %}
+                <ul class="app-nav-list">
+                    <li class="app-nav-item">
+                        <a
+                            href="{% url 'app:dashboard' %}"
+                            class="app-nav-link {% if current_url == 'dashboard' %}app-nav-link--active{% endif %}"
+                            {% if current_url == 'dashboard' %}aria-current="page"{% endif %}>
+                            Inicio
+                        </a>
+                    </li>
+                    <li class="app-nav-item">
+                        <a
+                            href="{% url 'app:clients' %}"
+                            class="app-nav-link {% if current_url == 'clients' %}app-nav-link--active{% endif %}"
+                            {% if current_url == 'clients' %}aria-current="page"{% endif %}>
+                            Clientes
+                        </a>
+                    </li>
+                    <li class="app-nav-item">
+                        <a
+                            href="{% url 'app:transactions' %}"
+                            class="app-nav-link {% if current_url == 'transactions' %}app-nav-link--active{% endif %}"
+                            {% if current_url == 'transactions' %}aria-current="page"{% endif %}>
+                            Transacciones
+                        </a>
+                    </li>
+                    <li class="app-nav-item">
+                        <a
+                            href="{% url 'app:metrics' %}"
+                            class="app-nav-link {% if current_url == 'metrics' %}app-nav-link--active{% endif %}"
+                            {% if current_url == 'metrics' %}aria-current="page"{% endif %}>
+                            Métricas
+                        </a>
+                    </li>
+                </ul>
+                {% endwith %}
+            </nav>
+
+            <div class="app-sidebar-footer">
+                <span class="app-user-email" title="{{ user.email }}">{{ user.email }}</span>
+                <form method="post" action="{% url 'app:logout' %}" class="app-logout-form">
+                    {% csrf_token %}
+                    <button type="submit" class="btn-secondary">Cerrar Sesión</button>
+                </form>
+            </div>
+        </aside>
+
+        <!-- Área Principal de Trabajo -->
+        <main class="app-main">
+            {% if messages %}
+                <section class="messages-container" aria-label="Notificaciones del sistema">
+                    {% for message in messages %}
+                        <div class="alert-stoic" role="status">{{ message }}</div>
+                    {% endfor %}
+                </section>
+            {% endif %}
+
+            <div class="app-canvas">
+                {% block content %}{% endblock %}
+            </div>
+        </main>
+    </div>
+
+    <script>
+        (function () {
+            var sidebar = document.getElementById("app-sidebar");
+            var backdrop = document.getElementById("sidebar-backdrop");
+            var toggleBtn = document.getElementById("sidebar-toggle");
+            var closeBtn = document.getElementById("sidebar-close");
+
+            function openSidebar() {
+                if (!sidebar || !backdrop || !toggleBtn) return;
+                sidebar.classList.add("is-open");
+                backdrop.classList.add("is-open");
+                toggleBtn.setAttribute("aria-expanded", "true");
+                document.body.style.overflow = "hidden";
+            }
+
+            function closeSidebar() {
+                if (!sidebar || !backdrop || !toggleBtn) return;
+                sidebar.classList.remove("is-open");
+                backdrop.classList.remove("is-open");
+                toggleBtn.setAttribute("aria-expanded", "false");
+                document.body.style.overflow = "";
+            }
+
+            if (toggleBtn) {
+                toggleBtn.addEventListener("click", function () {
+                    if (sidebar.classList.contains("is-open")) {
+                        closeSidebar();
+                    } else {
+                        openSidebar();
+                    }
+                });
+            }
+
+            if (closeBtn) {
+                closeBtn.addEventListener("click", closeSidebar);
+            }
+
+            if (backdrop) {
+                backdrop.addEventListener("click", closeSidebar);
+            }
+
+            document.addEventListener("keydown", function (event) {
+                if (event.key === "Escape" && sidebar && sidebar.classList.contains("is-open")) {
+                    closeSidebar();
+                }
+            });
+        })();
+    </script>
+</body>
+</html>

@@ -5,6 +5,7 @@ Incluye la Landing Page y el módulo completo de Autenticación y Gestión de Cu
 
 from django.contrib import messages
 from django.contrib.auth import get_user_model
+from django.contrib.auth.decorators import login_required
 from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth.views import (
     LoginView,
@@ -34,8 +35,41 @@ CustomUser = get_user_model()
 
 
 def home(request):
-    """Renderiza la Landing Page (app/home.html) directamente sin realizar consultas a PostgreSQL."""
+    """
+    Si el usuario tiene una sesión iniciada y activa, redirige al Dashboard.
+    Para usuarios anónimos, renderiza la Landing Page (app/home.html) sin consultas a PostgreSQL.
+    """
+    if request.user.is_authenticated:
+        return redirect("app:dashboard")
     return render(request, "app/home.html")
+
+
+@login_required
+@require_http_methods(["GET"])
+def dashboard_view(request):
+    """Interfaz principal del Dashboard (Inicio) para usuarios autenticados."""
+    return render(request, "app/dashboard.html")
+
+
+@login_required
+@require_http_methods(["GET"])
+def clients_view(request):
+    """Interfaz de Clientes para usuarios autenticados."""
+    return render(request, "app/clients.html")
+
+
+@login_required
+@require_http_methods(["GET"])
+def transactions_view(request):
+    """Interfaz de Transacciones para usuarios autenticados."""
+    return render(request, "app/transactions.html")
+
+
+@login_required
+@require_http_methods(["GET"])
+def metrics_view(request):
+    """Interfaz de Métricas para usuarios autenticados."""
+    return render(request, "app/metrics.html")
 
 
 class CustomLoginView(LoginView):
@@ -60,7 +94,7 @@ def register_view(request):
     Crea la cuenta con is_active=False y despacha el correo de confirmación.
     """
     if request.user.is_authenticated:
-        return redirect("app:home")
+        return redirect("app:dashboard")
 
     if request.method == "POST":
         form = CustomUserCreationForm(request.POST)

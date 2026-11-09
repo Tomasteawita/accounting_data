@@ -92,7 +92,7 @@ CACHES = {
 # Modelo de Usuario Personalizado y Redirecciones de Autenticación
 AUTH_USER_MODEL = "app.CustomUser"
 LOGIN_URL = "app:login"
-LOGIN_REDIRECT_URL = "app:home"
+LOGIN_REDIRECT_URL = "app:dashboard"
 LOGOUT_REDIRECT_URL = "app:login"
 
 AUTH_PASSWORD_VALIDATORS = [

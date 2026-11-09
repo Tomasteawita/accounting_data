@@ -9,6 +9,11 @@ app_name = "app"
 
 urlpatterns = [
     path("", views.home, name="home"),
+    # Módulo App Interna (Dashboard y Navegación Principal)
+    path("dashboard/", views.dashboard_view, name="dashboard"),
+    path("clientes/", views.clients_view, name="clients"),
+    path("transacciones/", views.transactions_view, name="transactions"),
+    path("metricas/", views.metrics_view, name="metrics"),
     # Autenticación y Registro
     path("auth/login/", views.CustomLoginView.as_view(), name="login"),
     path("auth/logout/", views.CustomLogoutView.as_view(), name="logout"),
