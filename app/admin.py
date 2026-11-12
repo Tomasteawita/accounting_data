@@ -7,7 +7,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
 from .forms import CustomUserChangeForm, CustomUserCreationForm
-from .models import CustomUser
+from .models import Cliente, CustomUser, Transaction
 
 
 @admin.register(CustomUser)
@@ -56,3 +56,28 @@ class CustomUserAdmin(UserAdmin):
             },
         ),
     )
+
+
+@admin.register(Cliente)
+class ClienteAdmin(admin.ModelAdmin):
+    list_display = ("nombre_completo", "user", "email", "telefono", "sexo", "documentacion", "created_at")
+    search_fields = ("nombre_completo", "email", "user__email")
+    list_filter = ("sexo", "created_at")
+
+
+@admin.register(Transaction)
+class TransactionAdmin(admin.ModelAdmin):
+    list_display = (
+        "date",
+        "vertical",
+        "transaction_type",
+        "concept",
+        "client",
+        "detail",
+        "amount",
+        "currency",
+        "user",
+    )
+    list_filter = ("transaction_type", "currency", "vertical", "date")
+    search_fields = ("concept", "detail", "vertical", "client__nombre_completo", "user__email")
+    ordering = ("-date", "-id")

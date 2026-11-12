@@ -12,6 +12,9 @@ urlpatterns = [
     # Módulo App Interna (Dashboard y Navegación Principal)
     path("dashboard/", views.dashboard_view, name="dashboard"),
     path("clientes/", views.clients_view, name="clients"),
+    path("clientes/crear/", views.client_create_view, name="client_create"),
+    path("clientes/<int:pk>/editar/", views.client_update_view, name="client_update"),
+    path("clientes/<int:pk>/eliminar/", views.client_delete_view, name="client_delete"),
     path("transacciones/", views.transactions_view, name="transactions"),
     path("metricas/", views.metrics_view, name="metrics"),
     # Autenticación y Registro

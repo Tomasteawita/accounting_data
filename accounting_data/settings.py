@@ -124,7 +124,7 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
-# Archivos estáticos
+# Archivos estáticos y multimedia (almacenamiento local de PDFs de clientes)
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_FINDERS = [
@@ -132,9 +132,13 @@ STATICFILES_FINDERS = [
     "django.contrib.staticfiles.finders.AppDirectoriesFinder",
 ]
 
-# Límites de carga en memoria (alineados con los 5MB de Nginx y 2GB RAM)
-DATA_UPLOAD_MAX_MEMORY_SIZE = 5242880  # 5 MB
-FILE_UPLOAD_MAX_MEMORY_SIZE = 5242880  # 5 MB
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
+
+# Límites de carga en recepción HTTP (permite recibir hasta 15MB para que los formularios
+# apliquen sus validadores estrictos de 10MB en PDFs y 5MB en planillas CSV/Excel)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 15728640  # 15 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 5242880   # 5 MB en RAM antes de stream temporal
 
 # Directivas de seguridad en producción
 if not DEBUG:

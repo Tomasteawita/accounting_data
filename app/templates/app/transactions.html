@@ -3,5 +3,810 @@
 {% block title %}Transacciones — Tomas Cueva{% endblock %}
 
 {% block content %}
-<section class="blank-workspace" aria-label="Transacciones"></section>
+<section class="tx-module" aria-label="Libro de Transacciones">
+    <!-- Encabezado Contable del Módulo -->
+    <header class="tx-header">
+        <div>
+            <span class="section-tag">[ MÓDULO OPERATIVO: FLUJO DE CAJA ]</span>
+            <h1 class="tx-title">Transacciones (Ingresos y Gastos)</h1>
+        </div>
+    </header>
+
+    <!-- Notificaciones Dinámicas (Fetch API) -->
+    <div id="tx-status-banner" class="alert-stoic tx-status-hidden" role="status" aria-live="polite"></div>
+
+    <!-- Panel de Ingesta Masiva en Memoria (CSV / Excel) -->
+    <section class="tx-upload-panel" aria-label="Ingesta masiva de archivos">
+        <div class="tx-upload-info">
+            <h2 class="tx-panel-heading">Ingesta Masiva en Memoria (CSV / Excel)</h2>
+            <p class="tx-panel-help">
+                Estructura de columnas: <code>Fecha</code> (YYYY-MM-DD), <code>Vertical</code>, <code>Tipo</code> (Gasto/Ingreso), <code>Concepto</code>, <code>Cliente</code> (nombre o ID), <code>Detalle</code>, <code>Monto</code> y <code>Moneda</code> (ARS/USD). Límite: 5 MB en RAM.
+            </p>
+        </div>
+        <form id="bulk-upload-form" class="tx-upload-form" method="post" action="{% url 'app:transactions' %}" enctype="multipart/form-data" novalidate>
+            {% csrf_token %}
+            <input type="hidden" name="action" value="bulk_upload">
+            <div class="tx-upload-controls">
+                {{ upload_form.file }}
+                <button type="submit" id="btn-upload-submit" class="btn-secondary tx-upload-btn">
+                    Importar Archivo
+                </button>
+            </div>
+        </form>
+    </section>
+
+    <!-- Barra de Herramientas de la Hoja de Cálculo -->
+    <div class="sheet-toolbar" role="toolbar" aria-label="Controles de hoja de cálculo">
+        <div class="sheet-toolbar-left">
+            <button type="button" id="btn-add-row" class="btn-secondary sheet-add-btn" title="Agregar nueva fila manual">
+                + Agregar Fila
+            </button>
+            <span id="dirty-indicator" class="sheet-dirty-badge">Sin cambios pendientes</span>
+        </div>
+        <div class="sheet-toolbar-right">
+            <button type="button" id="btn-save-all" class="btn-primary sheet-save-btn">
+                Guardar Cambios
+            </button>
+        </div>
+    </div>
+
+    <!-- Formulario oculto de referencia para CSRF y datalist de Clientes -->
+    <form id="spreadsheet-csrf-form" method="post" action="{% url 'app:transactions' %}" class="tx-hidden-form">
+        {% csrf_token %}
+    </form>
+
+    <datalist id="clients-datalist">
+        {% for client in clients %}
+            <option value="{{ client.name }}" data-id="{{ client.id }}"></option>
+        {% endfor %}
+    </datalist>
+
+    <!-- Tabla Editable Tipo Hoja de Cálculo (8 Columnas Contables + Acciones) -->
+    <div class="sheet-container">
+        <div class="table-responsive-wrapper">
+            <table id="transactions-table" class="sheet-table" aria-label="Hoja de cálculo de transacciones">
+                <thead>
+                    <tr>
+                        <th scope="col" class="col-date">Fecha</th>
+                        <th scope="col" class="col-vertical">Vertical</th>
+                        <th scope="col" class="col-type">Tipo</th>
+                        <th scope="col" class="col-concept">Concepto</th>
+                        <th scope="col" class="col-client">Cliente</th>
+                        <th scope="col" class="col-detail">Detalle</th>
+                        <th scope="col" class="col-amount">Monto</th>
+                        <th scope="col" class="col-currency">Moneda</th>
+                        <th scope="col" class="col-actions">Acciones</th>
+                    </tr>
+                </thead>
+                <tbody id="transactions-tbody">
+                    {% for tx in transactions %}
+                    <tr class="sheet-row" data-id="{{ tx.id }}" data-client-id="{{ tx.client_id|default:'' }}" data-dirty="false">
+                        <td class="cell-date">
+                            <input
+                                type="date"
+                                name="date"
+                                class="sheet-input"
+                                value="{{ tx.date|date:'Y-m-d' }}"
+                                disabled
+                                required
+                                aria-label="Fecha">
+                        </td>
+                        <td class="cell-vertical">
+                            <input
+                                type="text"
+                                name="vertical"
+                                class="sheet-input"
+                                value="{{ tx.vertical }}"
+                                maxlength="120"
+                                placeholder="Unidad de negocio"
+                                disabled
+                                aria-label="Vertical">
+                        </td>
+                        <td class="cell-type">
+                            <select name="transaction_type" class="sheet-select" disabled aria-label="Tipo">
+                                <option value="INGRESO" {% if tx.transaction_type == 'INGRESO' %}selected{% endif %}>Ingreso</option>
+                                <option value="GASTO" {% if tx.transaction_type == 'GASTO' or tx.transaction_type == 'EGRESO' %}selected{% endif %}>Gasto</option>
+                            </select>
+                        </td>
+                        <td class="cell-concept">
+                            <input
+                                type="text"
+                                name="concept"
+                                class="sheet-input"
+                                value="{{ tx.concept }}"
+                                maxlength="150"
+                                placeholder="Tipo de ingreso/gasto"
+                                disabled
+                                required
+                                aria-label="Concepto">
+                        </td>
+                        <td class="cell-client">
+                            <input
+                                type="text"
+                                name="client"
+                                list="clients-datalist"
+                                class="sheet-input"
+                                value="{{ tx.client.name|default:'' }}"
+                                maxlength="150"
+                                placeholder="Nombre de cliente"
+                                disabled
+                                aria-label="Cliente">
+                        </td>
+                        <td class="cell-detail">
+                            <input
+                                type="text"
+                                name="detail"
+                                class="sheet-input"
+                                value="{{ tx.detail }}"
+                                maxlength="255"
+                                placeholder="Detalle adicional"
+                                disabled
+                                aria-label="Detalle">
+                        </td>
+                        <td class="cell-amount">
+                            <input
+                                type="number"
+                                name="amount"
+                                class="sheet-input sheet-input--num"
+                                value="{{ tx.amount|stringformat:'.2f' }}"
+                                step="0.01"
+                                min="0.01"
+                                placeholder="0.00"
+                                disabled
+                                required
+                                aria-label="Monto">
+                        </td>
+                        <td class="cell-currency">
+                            <select name="currency" class="sheet-select" disabled aria-label="Moneda">
+                                <option value="ARS" {% if tx.currency == 'ARS' %}selected{% endif %}>ARS</option>
+                                <option value="USD" {% if tx.currency == 'USD' %}selected{% endif %}>USD</option>
+                            </select>
+                        </td>
+                        <td class="cell-actions">
+                            <div class="row-actions-group">
+                                <button type="button" class="btn-row-action btn-edit-row">Modificar</button>
+                                <button type="button" class="btn-row-action btn-delete-row">Eliminar</button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr id="empty-sheet-row" class="sheet-empty-row">
+                        <td colspan="9" class="sheet-empty-cell">
+                            No existen transacciones registradas. Presione <strong>+ Agregar Fila</strong> o importe un archivo CSV/Excel.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Navegador de Páginas y Selector de Filas por Página (25 a 100 máx.) -->
+        <nav class="sheet-pagination" aria-label="Navegación de páginas de transacciones"
+             data-current-page="{{ pagination.page }}"
+             data-per-page="{{ pagination.per_page }}"
+             data-total-pages="{{ pagination.total_pages }}">
+            <div class="pagination-size-control">
+                <label for="per-page-select" class="pagination-label">Filas por página:</label>
+                <select id="per-page-select" class="sheet-select pagination-select" aria-label="Cantidad de filas por página">
+                    {% for size in allowed_page_sizes %}
+                        <option value="{{ size }}" {% if per_page == size %}selected{% endif %}>{{ size }}</option>
+                    {% endfor %}
+                </select>
+                <span id="pagination-summary" class="pagination-summary">
+                    {% if pagination.total_count > 0 %}
+                        Mostrando {{ pagination.start_index }}–{{ pagination.end_index }} de {{ pagination.total_count }} registros
+                    {% else %}
+                        0 registros
+                    {% endif %}
+                </span>
+            </div>
+
+            <div class="pagination-nav-controls">
+                <button
+                    type="button"
+                    id="btn-page-first"
+                    class="btn-row-action pagination-btn"
+                    {% if not pagination.has_previous %}disabled{% endif %}
+                    aria-label="Primera página">
+                    &laquo; Primera
+                </button>
+                <button
+                    type="button"
+                    id="btn-page-prev"
+                    class="btn-row-action pagination-btn"
+                    {% if not pagination.has_previous %}disabled{% endif %}
+                    aria-label="Página anterior">
+                    &lsaquo; Anterior
+                </button>
+                <span id="pagination-page-indicator" class="pagination-page-indicator">
+                    Página {{ pagination.page }} de {{ pagination.total_pages }}
+                </span>
+                <button
+                    type="button"
+                    id="btn-page-next"
+                    class="btn-row-action pagination-btn"
+                    {% if not pagination.has_next %}disabled{% endif %}
+                    aria-label="Página siguiente">
+                    Siguiente &rsaquo;
+                </button>
+                <button
+                    type="button"
+                    id="btn-page-last"
+                    class="btn-row-action pagination-btn"
+                    {% if not pagination.has_next %}disabled{% endif %}
+                    aria-label="Última página">
+                    Última &raquo;
+                </button>
+            </div>
+        </nav>
+    </div>
+</section>
+
+<script>
+(function () {
+    var endpoint = "{% url 'app:transactions' %}";
+    var csrfInput = document.querySelector("#spreadsheet-csrf-form input[name='csrfmiddlewaretoken']");
+    var csrfToken = csrfInput ? csrfInput.value : "";
+    var tbody = document.getElementById("transactions-tbody");
+    var addRowBtn = document.getElementById("btn-add-row");
+    var saveAllBtn = document.getElementById("btn-save-all");
+    var dirtyIndicator = document.getElementById("dirty-indicator");
+    var statusBanner = document.getElementById("tx-status-banner");
+    var uploadForm = document.getElementById("bulk-upload-form");
+    var uploadBtn = document.getElementById("btn-upload-submit");
+    var clientsDatalist = document.getElementById("clients-datalist");
+
+    // Estado y controles de paginación
+    var paginationNav = document.querySelector(".sheet-pagination");
+    var perPageSelect = document.getElementById("per-page-select");
+    var paginationSummary = document.getElementById("pagination-summary");
+    var pageIndicator = document.getElementById("pagination-page-indicator");
+    var btnFirst = document.getElementById("btn-page-first");
+    var btnPrev = document.getElementById("btn-page-prev");
+    var btnNext = document.getElementById("btn-page-next");
+    var btnLast = document.getElementById("btn-page-last");
+
+    var currentPage = paginationNav ? parseInt(paginationNav.getAttribute("data-current-page") || "1", 10) : 1;
+    var currentPerPage = paginationNav ? parseInt(paginationNav.getAttribute("data-per-page") || "25", 10) : 25;
+    var totalPages = paginationNav ? parseInt(paginationNav.getAttribute("data-total-pages") || "1", 10) : 1;
+
+    function todayISO() {
+        var d = new Date();
+        var month = String(d.getMonth() + 1).padStart(2, "0");
+        var day = String(d.getDate()).padStart(2, "0");
+        return d.getFullYear() + "-" + month + "-" + day;
+    }
+
+    function showBanner(message, isError) {
+        if (!statusBanner) return;
+        statusBanner.textContent = message;
+        statusBanner.classList.remove("tx-status-hidden", "alert-stoic--error");
+        if (isError) {
+            statusBanner.classList.add("alert-stoic--error");
+        }
+    }
+
+    function updateDirtyCounter() {
+        if (!tbody || !dirtyIndicator) return;
+        var dirtyRows = tbody.querySelectorAll("tr.sheet-row[data-dirty='true']");
+        var count = dirtyRows.length;
+        if (count === 0) {
+            dirtyIndicator.textContent = "Sin cambios pendientes";
+            dirtyIndicator.classList.remove("sheet-dirty-badge--active");
+        } else {
+            dirtyIndicator.textContent = count + (count === 1 ? " fila pendiente de guardar" : " filas pendientes de guardar");
+            dirtyIndicator.classList.add("sheet-dirty-badge--active");
+        }
+    }
+
+    function updatePaginationUI(meta) {
+        if (!meta) return;
+        currentPage = meta.page || 1;
+        currentPerPage = Math.min(Math.max(meta.per_page || 25, 1), 100);
+        totalPages = meta.total_pages || 1;
+
+        if (paginationNav) {
+            paginationNav.setAttribute("data-current-page", String(currentPage));
+            paginationNav.setAttribute("data-per-page", String(currentPerPage));
+            paginationNav.setAttribute("data-total-pages", String(totalPages));
+        }
+
+        if (perPageSelect) {
+            perPageSelect.value = String(currentPerPage);
+        }
+
+        if (paginationSummary) {
+            if (meta.total_count > 0) {
+                paginationSummary.textContent =
+                    "Mostrando " + meta.start_index + "–" + meta.end_index + " de " + meta.total_count + " registros";
+            } else {
+                paginationSummary.textContent = "0 registros";
+            }
+        }
+
+        if (pageIndicator) {
+            pageIndicator.textContent = "Página " + currentPage + " de " + totalPages;
+        }
+
+        if (btnFirst) btnFirst.disabled = !meta.has_previous;
+        if (btnPrev) btnPrev.disabled = !meta.has_previous;
+        if (btnNext) btnNext.disabled = !meta.has_next;
+        if (btnLast) btnLast.disabled = !meta.has_next;
+
+        if (window.history && window.history.replaceState) {
+            var newUrl = endpoint + "?page=" + currentPage + "&per_page=" + currentPerPage;
+            window.history.replaceState(null, "", newUrl);
+        }
+    }
+
+    function fetchPage(targetPage, targetPerPage) {
+        var clampedPerPage = Math.min(Math.max(parseInt(targetPerPage || currentPerPage, 10) || 25, 1), 100);
+        var pageNum = Math.max(parseInt(targetPage || 1, 10) || 1, 1);
+        var url = endpoint + "?page=" + pageNum + "&per_page=" + clampedPerPage;
+
+        fetch(url, {
+            method: "GET",
+            headers: {
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "application/json"
+            }
+        })
+        .then(function (res) {
+            return res.json().then(function (data) {
+                return { ok: res.ok, data: data };
+            });
+        })
+        .then(function (result) {
+            if (!result.ok || result.data.status !== "ok") {
+                showBanner("Error al cargar la página solicitada.", true);
+                return;
+            }
+            if (Array.isArray(result.data.transactions)) {
+                renderAllRows(result.data.transactions);
+            }
+            if (result.data.pagination) {
+                updatePaginationUI(result.data.pagination);
+            }
+        })
+        .catch(function () {
+            showBanner("Error de red al cambiar de página.", true);
+        });
+    }
+
+    function removeEmptyPlaceholder() {
+        var emptyRow = document.getElementById("empty-sheet-row");
+        if (emptyRow && emptyRow.parentNode) {
+            emptyRow.parentNode.removeChild(emptyRow);
+        }
+    }
+
+    function ensureEmptyPlaceholder() {
+        if (!tbody) return;
+        var rows = tbody.querySelectorAll("tr.sheet-row");
+        if (rows.length === 0 && !document.getElementById("empty-sheet-row")) {
+            var tr = document.createElement("tr");
+            tr.id = "empty-sheet-row";
+            tr.className = "sheet-empty-row";
+            var td = document.createElement("td");
+            td.colSpan = 9;
+            td.className = "sheet-empty-cell";
+            td.innerHTML = "No existen transacciones registradas. Presione <strong>+ Agregar Fila</strong> o importe un archivo CSV/Excel.";
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+        }
+    }
+
+    function updateClientsDatalist(clientsList) {
+        if (!clientsDatalist || !Array.isArray(clientsList)) return;
+        clientsDatalist.innerHTML = "";
+        for (var i = 0; i < clientsList.length; i++) {
+            var opt = document.createElement("option");
+            opt.value = clientsList[i].name;
+            opt.setAttribute("data-id", String(clientsList[i].id));
+            clientsDatalist.appendChild(opt);
+        }
+    }
+
+    function setRowEditable(tr, editable) {
+        var fields = tr.querySelectorAll("input, select");
+        for (var i = 0; i < fields.length; i++) {
+            fields[i].disabled = !editable;
+        }
+        var editBtn = tr.querySelector(".btn-edit-row");
+        if (editable) {
+            tr.classList.add("is-editing");
+            tr.setAttribute("data-dirty", "true");
+            if (editBtn) {
+                editBtn.textContent = "Editando";
+                editBtn.classList.add("btn-row-action--active");
+            }
+        } else {
+            tr.classList.remove("is-editing");
+            tr.setAttribute("data-dirty", "false");
+            if (editBtn) {
+                editBtn.textContent = "Modificar";
+                editBtn.classList.remove("btn-row-action--active");
+            }
+        }
+        updateDirtyCounter();
+    }
+
+    function buildRowElement(txData, isNew) {
+        var tr = document.createElement("tr");
+        tr.className = "sheet-row" + (isNew ? " is-editing" : "");
+        tr.setAttribute("data-id", txData.id ? String(txData.id) : "");
+        tr.setAttribute("data-client-id", txData.client ? String(txData.client) : "");
+        tr.setAttribute("data-dirty", isNew ? "true" : "false");
+
+        var dateVal = txData.date || todayISO();
+        var verticalVal = txData.vertical || "";
+        var typeVal = txData.transaction_type || "INGRESO";
+        if (typeVal === "EGRESO") typeVal = "GASTO";
+        var conceptVal = txData.concept || "";
+        var clientNameVal = txData.client_name || "";
+        var detailVal = txData.detail || "";
+        var amountVal = txData.amount !== undefined && txData.amount !== null ? String(txData.amount) : "";
+        var currencyVal = txData.currency || "ARS";
+        var disabledAttr = isNew ? "" : "disabled";
+
+        tr.innerHTML =
+            '<td class="cell-date">' +
+                '<input type="date" name="date" class="sheet-input" value="' + dateVal + '" ' + disabledAttr + ' required aria-label="Fecha">' +
+            "</td>" +
+            '<td class="cell-vertical">' +
+                '<input type="text" name="vertical" class="sheet-input" maxlength="120" placeholder="Unidad de negocio" ' + disabledAttr + ' aria-label="Vertical">' +
+            "</td>" +
+            '<td class="cell-type">' +
+                '<select name="transaction_type" class="sheet-select" ' + disabledAttr + ' aria-label="Tipo">' +
+                    '<option value="INGRESO"' + (typeVal === "INGRESO" ? " selected" : "") + ">Ingreso</option>" +
+                    '<option value="GASTO"' + (typeVal === "GASTO" ? " selected" : "") + ">Gasto</option>" +
+                "</select>" +
+            "</td>" +
+            '<td class="cell-concept">' +
+                '<input type="text" name="concept" class="sheet-input" maxlength="150" placeholder="Tipo de ingreso/gasto" ' + disabledAttr + ' required aria-label="Concepto">' +
+            "</td>" +
+            '<td class="cell-client">' +
+                '<input type="text" name="client" list="clients-datalist" class="sheet-input" maxlength="150" placeholder="Nombre de cliente" ' + disabledAttr + ' aria-label="Cliente">' +
+            "</td>" +
+            '<td class="cell-detail">' +
+                '<input type="text" name="detail" class="sheet-input" maxlength="255" placeholder="Detalle adicional" ' + disabledAttr + ' aria-label="Detalle">' +
+            "</td>" +
+            '<td class="cell-amount">' +
+                '<input type="number" name="amount" class="sheet-input sheet-input--num" value="' + amountVal + '" step="0.01" min="0.01" placeholder="0.00" ' + disabledAttr + ' required aria-label="Monto">' +
+            "</td>" +
+            '<td class="cell-currency">' +
+                '<select name="currency" class="sheet-select" ' + disabledAttr + ' aria-label="Moneda">' +
+                    '<option value="ARS"' + (currencyVal === "ARS" ? " selected" : "") + ">ARS</option>" +
+                    '<option value="USD"' + (currencyVal === "USD" ? " selected" : "") + ">USD</option>" +
+                "</select>" +
+            "</td>" +
+            '<td class="cell-actions">' +
+                '<div class="row-actions-group">' +
+                    '<button type="button" class="btn-row-action btn-edit-row' + (isNew ? " btn-row-action--active" : "") + '">' + (isNew ? "Editando" : "Modificar") + "</button>" +
+                    '<button type="button" class="btn-row-action btn-delete-row">Eliminar</button>' +
+                "</div>" +
+            "</td>";
+
+        var verticalInput = tr.querySelector("input[name='vertical']");
+        if (verticalInput) verticalInput.value = verticalVal;
+        var conceptInput = tr.querySelector("input[name='concept']");
+        if (conceptInput) conceptInput.value = conceptVal;
+        var clientInput = tr.querySelector("input[name='client']");
+        if (clientInput) clientInput.value = clientNameVal;
+        var detailInput = tr.querySelector("input[name='detail']");
+        if (detailInput) detailInput.value = detailVal;
+
+        return tr;
+    }
+
+    function renderAllRows(transactionsList) {
+        if (!tbody) return;
+        tbody.innerHTML = "";
+        if (!Array.isArray(transactionsList) || transactionsList.length === 0) {
+            ensureEmptyPlaceholder();
+            updateDirtyCounter();
+            return;
+        }
+        for (var i = 0; i < transactionsList.length; i++) {
+            tbody.appendChild(buildRowElement(transactionsList[i], false));
+        }
+        updateDirtyCounter();
+    }
+
+    function extractRowPayload(tr) {
+        var idVal = tr.getAttribute("data-id") || "";
+        var dateInput = tr.querySelector("input[name='date']");
+        var verticalInput = tr.querySelector("input[name='vertical']");
+        var typeSelect = tr.querySelector("select[name='transaction_type']");
+        var conceptInput = tr.querySelector("input[name='concept']");
+        var clientInput = tr.querySelector("input[name='client']");
+        var detailInput = tr.querySelector("input[name='detail']");
+        var amountInput = tr.querySelector("input[name='amount']");
+        var currencySelect = tr.querySelector("select[name='currency']");
+
+        return {
+            id: idVal ? parseInt(idVal, 10) : null,
+            date: dateInput ? dateInput.value.trim() : "",
+            vertical: verticalInput ? verticalInput.value.trim() : "",
+            transaction_type: typeSelect ? typeSelect.value : "INGRESO",
+            concept: conceptInput ? conceptInput.value.trim() : "",
+            client: clientInput ? clientInput.value.trim() : "",
+            detail: detailInput ? detailInput.value.trim() : "",
+            amount: amountInput ? amountInput.value.trim() : "",
+            currency: currencySelect ? currencySelect.value : "ARS"
+        };
+    }
+
+    // 1. Botón "+" para agregar una nueva fila de ingreso manual
+    if (addRowBtn) {
+        addRowBtn.addEventListener("click", function () {
+            removeEmptyPlaceholder();
+            var newRow = buildRowElement(
+                {
+                    id: "",
+                    date: todayISO(),
+                    vertical: "",
+                    transaction_type: "INGRESO",
+                    concept: "",
+                    client: "",
+                    client_name: "",
+                    detail: "",
+                    amount: "",
+                    currency: "ARS"
+                },
+                true
+            );
+            if (tbody.firstChild) {
+                tbody.insertBefore(newRow, tbody.firstChild);
+            } else {
+                tbody.appendChild(newRow);
+            }
+            updateDirtyCounter();
+            var verticalField = newRow.querySelector("input[name='vertical']");
+            if (verticalField) {
+                verticalField.focus();
+            }
+        });
+    }
+
+    // 2. Delegación de eventos en la tabla para Modificar, Eliminar y cambios en inputs
+    if (tbody) {
+        tbody.addEventListener("input", function (event) {
+            var tr = event.target.closest("tr.sheet-row");
+            if (tr) {
+                tr.setAttribute("data-dirty", "true");
+                tr.classList.add("is-editing");
+                updateDirtyCounter();
+            }
+        });
+
+        tbody.addEventListener("change", function (event) {
+            var tr = event.target.closest("tr.sheet-row");
+            if (tr) {
+                tr.setAttribute("data-dirty", "true");
+                tr.classList.add("is-editing");
+                updateDirtyCounter();
+            }
+        });
+
+        tbody.addEventListener("click", function (event) {
+            var editBtn = event.target.closest(".btn-edit-row");
+            if (editBtn) {
+                var rowToEdit = editBtn.closest("tr.sheet-row");
+                if (rowToEdit) {
+                    setRowEditable(rowToEdit, true);
+                    var firstInput = rowToEdit.querySelector("input[name='concept']") || rowToEdit.querySelector("input");
+                    if (firstInput) firstInput.focus();
+                }
+                return;
+            }
+
+            var deleteBtn = event.target.closest(".btn-delete-row");
+            if (deleteBtn) {
+                var rowToDelete = deleteBtn.closest("tr.sheet-row");
+                if (!rowToDelete) return;
+                var txId = rowToDelete.getAttribute("data-id");
+
+                if (!txId) {
+                    rowToDelete.parentNode.removeChild(rowToDelete);
+                    ensureEmptyPlaceholder();
+                    updateDirtyCounter();
+                    return;
+                }
+
+                deleteBtn.disabled = true;
+                fetch(endpoint, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRFToken": csrfToken,
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Accept": "application/json"
+                    },
+                    body: JSON.stringify({
+                        action: "delete",
+                        id: parseInt(txId, 10),
+                        page: currentPage,
+                        per_page: currentPerPage
+                    })
+                })
+                .then(function (res) {
+                    return res.json().then(function (data) {
+                        return { ok: res.ok, data: data };
+                    });
+                })
+                .then(function (result) {
+                    if (!result.ok || result.data.status !== "ok") {
+                        deleteBtn.disabled = false;
+                        showBanner(result.data.message || "Error al eliminar el registro.", true);
+                        return;
+                    }
+                    if (Array.isArray(result.data.transactions)) {
+                        renderAllRows(result.data.transactions);
+                    } else {
+                        rowToDelete.parentNode.removeChild(rowToDelete);
+                        ensureEmptyPlaceholder();
+                        updateDirtyCounter();
+                    }
+                    if (result.data.pagination) {
+                        updatePaginationUI(result.data.pagination);
+                    }
+                    showBanner(result.data.message || "Transacción eliminada.", false);
+                })
+                .catch(function () {
+                    deleteBtn.disabled = false;
+                    showBanner("Error de red al intentar eliminar la transacción.", true);
+                });
+            }
+        });
+    }
+
+    // 3. Botón general "Guardar Cambios" (confirmación en lote vía Fetch API)
+    if (saveAllBtn) {
+        saveAllBtn.addEventListener("click", function () {
+            if (!tbody) return;
+            var dirtyRows = tbody.querySelectorAll("tr.sheet-row[data-dirty='true']");
+            if (dirtyRows.length === 0) {
+                showBanner("No hay modificaciones manuales pendientes de guardar.", false);
+                return;
+            }
+
+            var payloadRows = [];
+            for (var i = 0; i < dirtyRows.length; i++) {
+                payloadRows.push(extractRowPayload(dirtyRows[i]));
+            }
+
+            saveAllBtn.disabled = true;
+            fetch(endpoint, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": csrfToken,
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Accept": "application/json"
+                },
+                body: JSON.stringify({
+                    action: "bulk_save",
+                    rows: payloadRows,
+                    page: currentPage,
+                    per_page: currentPerPage
+                })
+            })
+            .then(function (res) {
+                return res.json().then(function (data) {
+                    return { ok: res.ok, data: data };
+                });
+            })
+            .then(function (result) {
+                saveAllBtn.disabled = false;
+                if (!result.ok || result.data.status !== "ok") {
+                    showBanner(result.data.message || "Error de validación al guardar los cambios.", true);
+                    return;
+                }
+                if (Array.isArray(result.data.clients)) {
+                    updateClientsDatalist(result.data.clients);
+                }
+                if (Array.isArray(result.data.transactions)) {
+                    renderAllRows(result.data.transactions);
+                }
+                if (result.data.pagination) {
+                    updatePaginationUI(result.data.pagination);
+                }
+                showBanner(result.data.message || "Cambios guardados correctamente.", false);
+            })
+            .catch(function () {
+                saveAllBtn.disabled = false;
+                showBanner("Error de conexión al guardar los cambios.", true);
+            });
+        });
+    }
+
+    // 4. Formulario de ingesta masiva en memoria (Excel / CSV vía Fetch API)
+    if (uploadForm) {
+        uploadForm.addEventListener("submit", function (event) {
+            event.preventDefault();
+            var fileInput = uploadForm.querySelector("input[type='file']");
+            if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+                showBanner("Seleccione un archivo .csv o .xlsx antes de importar.", true);
+                return;
+            }
+
+            var formData = new FormData(uploadForm);
+            formData.set("action", "bulk_upload");
+            formData.set("page", "1");
+            formData.set("per_page", String(currentPerPage));
+            if (uploadBtn) uploadBtn.disabled = true;
+
+            fetch(endpoint, {
+                method: "POST",
+                headers: {
+                    "X-CSRFToken": csrfToken,
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Accept": "application/json"
+                },
+                body: formData
+            })
+            .then(function (res) {
+                return res.json().then(function (data) {
+                    return { ok: res.ok, data: data };
+                });
+            })
+            .then(function (result) {
+                if (uploadBtn) uploadBtn.disabled = false;
+                if (!result.ok || result.data.status !== "ok") {
+                    showBanner(result.data.message || "Error al procesar el archivo.", true);
+                    return;
+                }
+                uploadForm.reset();
+                if (Array.isArray(result.data.clients)) {
+                    updateClientsDatalist(result.data.clients);
+                }
+                if (Array.isArray(result.data.transactions)) {
+                    renderAllRows(result.data.transactions);
+                }
+                if (result.data.pagination) {
+                    updatePaginationUI(result.data.pagination);
+                }
+                showBanner(result.data.message, false);
+            })
+            .catch(function () {
+                if (uploadBtn) uploadBtn.disabled = false;
+                showBanner("Error de red durante la carga del archivo.", true);
+            });
+        });
+    }
+
+    // 5. Controles del Navegador de Páginas y Selector de Cantidad de Filas (25, 50, 100)
+    if (perPageSelect) {
+        perPageSelect.addEventListener("change", function () {
+            var newSize = Math.min(Math.max(parseInt(perPageSelect.value, 10) || 25, 1), 100);
+            fetchPage(1, newSize);
+        });
+    }
+
+    if (btnFirst) {
+        btnFirst.addEventListener("click", function () {
+            if (currentPage > 1) fetchPage(1, currentPerPage);
+        });
+    }
+
+    if (btnPrev) {
+        btnPrev.addEventListener("click", function () {
+            if (currentPage > 1) fetchPage(currentPage - 1, currentPerPage);
+        });
+    }
+
+    if (btnNext) {
+        btnNext.addEventListener("click", function () {
+            if (currentPage < totalPages) fetchPage(currentPage + 1, currentPerPage);
+        });
+    }
+
+    if (btnLast) {
+        btnLast.addEventListener("click", function () {
+            if (currentPage < totalPages) fetchPage(totalPages, currentPerPage);
+        });
+    }
+})();
+</script>
 {% endblock %}

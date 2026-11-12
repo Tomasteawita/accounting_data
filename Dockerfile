@@ -17,9 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar el código del proyecto y preparar directorio de estáticos
+# Copiar el código del proyecto y preparar directorios de estáticos y media
 COPY . /app/
-RUN mkdir -p /app/staticfiles && chown -R appuser:appgroup /app
+RUN mkdir -p /app/staticfiles /app/media && chown -R appuser:appgroup /app
 
 USER appuser
 

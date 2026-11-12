@@ -1,0 +1,675 @@
+{% extends "app/app_base.html" %}
+
+{% block title %}Clientes — Tomas Cueva{% endblock %}
+
+{% block content %}
+<section class="tx-module" aria-label="Gestión de Clientes">
+    <!-- Encabezado Contable del Módulo -->
+    <header class="tx-header">
+        <div>
+            <span class="section-tag">[ MÓDULO OPERATIVO: CARTERA DE CLIENTES ]</span>
+            <h1 class="tx-title">Clientes</h1>
+        </div>
+    </header>
+
+    <!-- Notificaciones Dinámicas (Fetch API) -->
+    <div id="client-status-banner" class="alert-stoic tx-status-hidden" role="status" aria-live="polite"></div>
+
+    <!-- Panel de Alta / Edición de Cliente (ClienteForm) -->
+    <section id="client-form-panel" class="tx-upload-panel" aria-label="Formulario de cliente">
+        <div class="tx-upload-info">
+            <h2 id="client-form-heading" class="tx-panel-heading">Registrar Nuevo Cliente</h2>
+            <p class="tx-panel-help">
+                Complete los datos del cliente. La documentación adjunta es opcional, restringida exclusivamente a formato <code>.pdf</code> con un peso máximo estricto de <strong>10 MB</strong> (10.485.760 bytes).
+            </p>
+        </div>
+
+        <form id="client-form" class="client-grid-form" method="post" action="{% url 'app:clients' %}" enctype="multipart/form-data" novalidate>
+            {% csrf_token %}
+            <input type="hidden" name="action" id="client-form-action" value="create">
+            <input type="hidden" name="id" id="client-form-id" value="">
+
+            <div class="client-form-fields">
+                <div class="form-group">
+                    <label for="id_nombre_completo" class="form-label">Nombre Completo *</label>
+                    {{ form.nombre_completo }}
+                </div>
+
+                <div class="form-group">
+                    <label for="id_email" class="form-label">Email</label>
+                    {{ form.email }}
+                </div>
+
+                <div class="form-group">
+                    <label for="id_telefono" class="form-label">Teléfono</label>
+                    {{ form.telefono }}
+                </div>
+
+                <div class="form-group">
+                    <label for="id_sexo" class="form-label">Sexo</label>
+                    {{ form.sexo }}
+                </div>
+
+                <div class="form-group client-form-file-group">
+                    <label for="id_documentacion" class="form-label">Documentación (.pdf máx. 10 MB)</label>
+                    {{ form.documentacion }}
+                </div>
+            </div>
+
+            <div id="client-form-error" class="field-error-item tx-status-hidden" role="alert"></div>
+
+            <div class="client-form-actions">
+                <button type="submit" id="btn-client-submit" class="btn-primary client-submit-btn">
+                    Guardar Cliente
+                </button>
+                <button type="button" id="btn-client-cancel" class="btn-secondary client-cancel-btn tx-status-hidden">
+                    Cancelar Edición
+                </button>
+            </div>
+        </form>
+    </section>
+
+    <!-- Input de archivo oculto para el botón rápido "Subir PDF" en la tabla -->
+    <input type="file" id="quick-pdf-input" class="tx-hidden-form" accept=".pdf,application/pdf">
+
+    <!-- Tabla de Clientes (Estética Flat Monocromática) -->
+    <div class="sheet-container">
+        <div class="table-responsive-wrapper">
+            <table id="clients-table" class="sheet-table clients-sheet-table" aria-label="Tabla de clientes">
+                <thead>
+                    <tr>
+                        <th scope="col" class="col-client-name">Nombre Completo</th>
+                        <th scope="col" class="col-client-email">Email</th>
+                        <th scope="col" class="col-client-phone">Teléfono</th>
+                        <th scope="col" class="col-client-sex">Sexo</th>
+                        <th scope="col" class="col-client-doc">Documentación</th>
+                        <th scope="col" class="col-actions">Acciones</th>
+                    </tr>
+                </thead>
+                <tbody id="clients-tbody">
+                    {% for c in clientes %}
+                    <tr class="sheet-row client-row"
+                        data-id="{{ c.id }}"
+                        data-nombre="{{ c.nombre_completo }}"
+                        data-email="{{ c.email|default:'' }}"
+                        data-telefono="{{ c.telefono|default:'' }}"
+                        data-sexo="{{ c.sexo|default:'Otro' }}">
+                        <td class="cell-static cell-static--strong">{{ c.nombre_completo }}</td>
+                        <td class="cell-static">{{ c.email|default:"—" }}</td>
+                        <td class="cell-static cell-static--mono">{{ c.telefono|default:"—" }}</td>
+                        <td class="cell-static cell-static--mono">{{ c.get_sexo_display }}</td>
+                        <td class="cell-static cell-doc">
+                            {% if c.documentacion %}
+                                <a href="{{ c.documentacion.url }}"
+                                   target="_blank"
+                                   rel="noopener noreferrer"
+                                   class="pdf-uploaded-link"
+                                   title="Ver o descargar PDF">
+                                    <svg class="pdf-icon-svg" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                                        <path d="M3 1.5h6.5L13 5v9.5H3V1.5z" fill="none" stroke="currentColor" stroke-width="1.4"/>
+                                        <path d="M9.5 1.5V5H13" fill="none" stroke="currentColor" stroke-width="1.4"/>
+                                        <path d="M5 8.5h6M5 11h4" fill="none" stroke="currentColor" stroke-width="1.2"/>
+                                    </svg>
+                                    <span>Subido</span>
+                                </a>
+                            {% else %}
+                                <button type="button" class="btn-row-action btn-upload-pdf" data-id="{{ c.id }}">
+                                    Subir PDF
+                                </button>
+                            {% endif %}
+                        </td>
+                        <td class="cell-actions">
+                            <div class="row-actions-group">
+                                <button type="button" class="btn-row-action btn-edit-client">Editar</button>
+                                <button type="button" class="btn-row-action btn-delete-client">Eliminar</button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr id="empty-clients-row" class="sheet-empty-row">
+                        <td colspan="6" class="sheet-empty-cell">
+                            No existen clientes registrados. Utilice el formulario superior para dar de alta su primer cliente.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Navegador de Páginas (25 por defecto, hasta 100 máx.) -->
+        <nav class="sheet-pagination" aria-label="Navegación de páginas de clientes"
+             data-current-page="{{ pagination.page }}"
+             data-per-page="{{ pagination.per_page }}"
+             data-total-pages="{{ pagination.total_pages }}">
+            <div class="pagination-size-control">
+                <label for="clients-per-page-select" class="pagination-label">Filas por página:</label>
+                <select id="clients-per-page-select" class="sheet-select pagination-select" aria-label="Cantidad de filas por página">
+                    {% for size in allowed_page_sizes %}
+                        <option value="{{ size }}" {% if per_page == size %}selected{% endif %}>{{ size }}</option>
+                    {% endfor %}
+                </select>
+                <span id="clients-pagination-summary" class="pagination-summary">
+                    {% if pagination.total_count > 0 %}
+                        Mostrando {{ pagination.start_index }}–{{ pagination.end_index }} de {{ pagination.total_count }} clientes
+                    {% else %}
+                        0 clientes
+                    {% endif %}
+                </span>
+            </div>
+
+            <div class="pagination-nav-controls">
+                <button
+                    type="button"
+                    id="btn-clients-first"
+                    class="btn-row-action pagination-btn"
+                    {% if not pagination.has_previous %}disabled{% endif %}
+                    aria-label="Primera página">
+                    &laquo; Primera
+                </button>
+                <button
+                    type="button"
+                    id="btn-clients-prev"
+                    class="btn-row-action pagination-btn"
+                    {% if not pagination.has_previous %}disabled{% endif %}
+                    aria-label="Página anterior">
+                    &lsaquo; Anterior
+                </button>
+                <span id="clients-page-indicator" class="pagination-page-indicator">
+                    Página {{ pagination.page }} de {{ pagination.total_pages }}
+                </span>
+                <button
+                    type="button"
+                    id="btn-clients-next"
+                    class="btn-row-action pagination-btn"
+                    {% if not pagination.has_next %}disabled{% endif %}
+                    aria-label="Página siguiente">
+                    Siguiente &rsaquo;
+                </button>
+                <button
+                    type="button"
+                    id="btn-clients-last"
+                    class="btn-row-action pagination-btn"
+                    {% if not pagination.has_next %}disabled{% endif %}
+                    aria-label="Última página">
+                    Última &raquo;
+                </button>
+            </div>
+        </nav>
+    </div>
+</section>
+
+<script>
+(function () {
+    var MAX_PDF_BYTES = 10485760; // 10 MB exactos (10.485.760 bytes)
+    var endpoint = "{% url 'app:clients' %}";
+    var form = document.getElementById("client-form");
+    var csrfInput = form ? form.querySelector("input[name='csrfmiddlewaretoken']") : null;
+    var csrfToken = csrfInput ? csrfInput.value : "";
+
+    var formHeading = document.getElementById("client-form-heading");
+    var formActionInput = document.getElementById("client-form-action");
+    var formIdInput = document.getElementById("client-form-id");
+    var nombreInput = document.getElementById("id_nombre_completo");
+    var emailInput = document.getElementById("id_email");
+    var telefonoInput = document.getElementById("id_telefono");
+    var sexoSelect = document.getElementById("id_sexo");
+    var docInput = document.getElementById("id_documentacion");
+    var formErrorBox = document.getElementById("client-form-error");
+    var submitBtn = document.getElementById("btn-client-submit");
+    var cancelBtn = document.getElementById("btn-client-cancel");
+    var statusBanner = document.getElementById("client-status-banner");
+    var tbody = document.getElementById("clients-tbody");
+    var quickPdfInput = document.getElementById("quick-pdf-input");
+    var quickUploadTargetId = null;
+
+    var paginationNav = document.querySelector(".sheet-pagination");
+    var perPageSelect = document.getElementById("clients-per-page-select");
+    var paginationSummary = document.getElementById("clients-pagination-summary");
+    var pageIndicator = document.getElementById("clients-page-indicator");
+    var btnFirst = document.getElementById("btn-clients-first");
+    var btnPrev = document.getElementById("btn-clients-prev");
+    var btnNext = document.getElementById("btn-clients-next");
+    var btnLast = document.getElementById("btn-clients-last");
+
+    var currentPage = paginationNav ? parseInt(paginationNav.getAttribute("data-current-page") || "1", 10) : 1;
+    var currentPerPage = paginationNav ? parseInt(paginationNav.getAttribute("data-per-page") || "25", 10) : 25;
+    var totalPages = paginationNav ? parseInt(paginationNav.getAttribute("data-total-pages") || "1", 10) : 1;
+
+    function escapeHTML(str) {
+        return String(str || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    }
+
+    function showBanner(msg, isError) {
+        if (!statusBanner) return;
+        statusBanner.textContent = msg;
+        statusBanner.classList.remove("tx-status-hidden", "alert-stoic--error");
+        if (isError) {
+            statusBanner.classList.add("alert-stoic--error");
+        }
+    }
+
+    function showFormError(msg) {
+        if (!formErrorBox) return;
+        if (!msg) {
+            formErrorBox.textContent = "";
+            formErrorBox.classList.add("tx-status-hidden");
+            return;
+        }
+        formErrorBox.textContent = msg;
+        formErrorBox.classList.remove("tx-status-hidden");
+    }
+
+    function validatePdfFileClientSide(fileObj) {
+        if (!fileObj) return null;
+        var name = (fileObj.name || "").toLowerCase().trim();
+        if (!name.endsWith(".pdf")) {
+            return "Formato inválido: Solo se permiten archivos con extensión .pdf.";
+        }
+        if (fileObj.size > MAX_PDF_BYTES) {
+            return "El archivo PDF supera el límite máximo permitido de 10 MB (10.485.760 bytes).";
+        }
+        return null;
+    }
+
+    function resetFormToCreate() {
+        if (!form) return;
+        form.reset();
+        formActionInput.value = "create";
+        formIdInput.value = "";
+        if (formHeading) formHeading.textContent = "Registrar Nuevo Cliente";
+        if (submitBtn) submitBtn.textContent = "Guardar Cliente";
+        if (cancelBtn) cancelBtn.classList.add("tx-status-hidden");
+        showFormError("");
+    }
+
+    function buildPdfCellHTML(c) {
+        if (c.has_pdf && c.pdf_url) {
+            return (
+                '<a href="' + escapeHTML(c.pdf_url) + '" target="_blank" rel="noopener noreferrer" class="pdf-uploaded-link" title="Ver o descargar PDF">' +
+                    '<svg class="pdf-icon-svg" viewBox="0 0 16 16" aria-hidden="true" focusable="false">' +
+                        '<path d="M3 1.5h6.5L13 5v9.5H3V1.5z" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
+                        '<path d="M9.5 1.5V5H13" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
+                        '<path d="M5 8.5h6M5 11h4" fill="none" stroke="currentColor" stroke-width="1.2"/>' +
+                    "</svg>" +
+                    "<span>Subido</span>" +
+                "</a>"
+            );
+        }
+        return (
+            '<button type="button" class="btn-row-action btn-upload-pdf" data-id="' + c.id + '">' +
+                "Subir PDF" +
+            "</button>"
+        );
+    }
+
+    function buildClientRow(c) {
+        var tr = document.createElement("tr");
+        tr.className = "sheet-row client-row";
+        tr.setAttribute("data-id", String(c.id));
+        tr.setAttribute("data-nombre", c.nombre_completo || "");
+        tr.setAttribute("data-email", c.email || "");
+        tr.setAttribute("data-telefono", c.telefono || "");
+        tr.setAttribute("data-sexo", c.sexo || "Otro");
+
+        tr.innerHTML =
+            '<td class="cell-static cell-static--strong">' + escapeHTML(c.nombre_completo) + "</td>" +
+            '<td class="cell-static">' + (c.email ? escapeHTML(c.email) : "—") + "</td>" +
+            '<td class="cell-static cell-static--mono">' + (c.telefono ? escapeHTML(c.telefono) : "—") + "</td>" +
+            '<td class="cell-static cell-static--mono">' + escapeHTML(c.sexo_display || c.sexo || "Otro") + "</td>" +
+            '<td class="cell-static cell-doc">' + buildPdfCellHTML(c) + "</td>" +
+            '<td class="cell-actions">' +
+                '<div class="row-actions-group">' +
+                    '<button type="button" class="btn-row-action btn-edit-client">Editar</button>' +
+                    '<button type="button" class="btn-row-action btn-delete-client">Eliminar</button>' +
+                "</div>" +
+            "</td>";
+        return tr;
+    }
+
+    function renderClientsTable(clientesList) {
+        if (!tbody) return;
+        tbody.innerHTML = "";
+        if (!Array.isArray(clientesList) || clientesList.length === 0) {
+            var tr = document.createElement("tr");
+            tr.id = "empty-clients-row";
+            tr.className = "sheet-empty-row";
+            tr.innerHTML =
+                '<td colspan="6" class="sheet-empty-cell">' +
+                    "No existen clientes registrados. Utilice el formulario superior para dar de alta su primer cliente." +
+                "</td>";
+            tbody.appendChild(tr);
+            return;
+        }
+        for (var i = 0; i < clientesList.length; i++) {
+            tbody.appendChild(buildClientRow(clientesList[i]));
+        }
+    }
+
+    function updatePaginationUI(meta) {
+        if (!meta) return;
+        currentPage = meta.page || 1;
+        currentPerPage = Math.min(Math.max(meta.per_page || 25, 1), 100);
+        totalPages = meta.total_pages || 1;
+
+        if (paginationNav) {
+            paginationNav.setAttribute("data-current-page", String(currentPage));
+            paginationNav.setAttribute("data-per-page", String(currentPerPage));
+            paginationNav.setAttribute("data-total-pages", String(totalPages));
+        }
+        if (perPageSelect) perPageSelect.value = String(currentPerPage);
+        if (paginationSummary) {
+            if (meta.total_count > 0) {
+                paginationSummary.textContent =
+                    "Mostrando " + meta.start_index + "–" + meta.end_index + " de " + meta.total_count + " clientes";
+            } else {
+                paginationSummary.textContent = "0 clientes";
+            }
+        }
+        if (pageIndicator) {
+            pageIndicator.textContent = "Página " + currentPage + " de " + totalPages;
+        }
+        if (btnFirst) btnFirst.disabled = !meta.has_previous;
+        if (btnPrev) btnPrev.disabled = !meta.has_previous;
+        if (btnNext) btnNext.disabled = !meta.has_next;
+        if (btnLast) btnLast.disabled = !meta.has_next;
+
+        if (window.history && window.history.replaceState) {
+            var newUrl = endpoint + "?page=" + currentPage + "&per_page=" + currentPerPage;
+            window.history.replaceState(null, "", newUrl);
+        }
+    }
+
+    function fetchClientsPage(targetPage, targetPerPage) {
+        var clampedPerPage = Math.min(Math.max(parseInt(targetPerPage || currentPerPage, 10) || 25, 1), 100);
+        var pageNum = Math.max(parseInt(targetPage || 1, 10) || 1, 1);
+        var url = endpoint + "?page=" + pageNum + "&per_page=" + clampedPerPage;
+
+        fetch(url, {
+            method: "GET",
+            headers: {
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "application/json"
+            }
+        })
+        .then(function (res) {
+            return res.json().then(function (data) {
+                return { ok: res.ok, data: data };
+            });
+        })
+        .then(function (result) {
+            if (!result.ok || result.data.status !== "ok") {
+                showBanner("Error al cargar la lista de clientes.", true);
+                return;
+            }
+            if (Array.isArray(result.data.clientes)) {
+                renderClientsTable(result.data.clientes);
+            }
+            if (result.data.pagination) {
+                updatePaginationUI(result.data.pagination);
+            }
+        })
+        .catch(function () {
+            showBanner("Error de conexión al cambiar de página.", true);
+        });
+    }
+
+    // Validación inmediata al elegir un archivo en el formulario principal
+    if (docInput) {
+        docInput.addEventListener("change", function () {
+            if (docInput.files && docInput.files.length > 0) {
+                var err = validatePdfFileClientSide(docInput.files[0]);
+                if (err) {
+                    showFormError(err);
+                    showBanner(err, true);
+                } else {
+                    showFormError("");
+                }
+            }
+        });
+    }
+
+    if (cancelBtn) {
+        cancelBtn.addEventListener("click", function () {
+            resetFormToCreate();
+        });
+    }
+
+    // Envío del formulario de creación / edición de cliente vía Fetch API
+    if (form) {
+        form.addEventListener("submit", function (event) {
+            event.preventDefault();
+            showFormError("");
+
+            var nombreVal = nombreInput ? nombreInput.value.trim() : "";
+            if (!nombreVal) {
+                showFormError("El nombre completo del cliente es obligatorio.");
+                return;
+            }
+
+            if (docInput && docInput.files && docInput.files.length > 0) {
+                var fileError = validatePdfFileClientSide(docInput.files[0]);
+                if (fileError) {
+                    showFormError(fileError);
+                    showBanner(fileError, true);
+                    return;
+                }
+            }
+
+            var formData = new FormData(form);
+            formData.set("page", String(currentPage));
+            formData.set("per_page", String(currentPerPage));
+            if (submitBtn) submitBtn.disabled = true;
+
+            fetch(endpoint, {
+                method: "POST",
+                headers: {
+                    "X-CSRFToken": csrfToken,
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Accept": "application/json"
+                },
+                body: formData
+            })
+            .then(function (res) {
+                return res.json().then(function (data) {
+                    return { ok: res.ok, data: data };
+                });
+            })
+            .then(function (result) {
+                if (submitBtn) submitBtn.disabled = false;
+                if (!result.ok || result.data.status !== "ok") {
+                    var errMsg = result.data.message || "Error de validación al guardar el cliente.";
+                    showFormError(errMsg);
+                    showBanner(errMsg, true);
+                    return;
+                }
+                resetFormToCreate();
+                if (Array.isArray(result.data.clientes)) {
+                    renderClientsTable(result.data.clientes);
+                }
+                if (result.data.pagination) {
+                    updatePaginationUI(result.data.pagination);
+                }
+                showBanner(result.data.message || "Cliente guardado correctamente.", false);
+            })
+            .catch(function () {
+                if (submitBtn) submitBtn.disabled = false;
+                showBanner("Error de red al guardar el cliente.", true);
+            });
+        });
+    }
+
+    // Eventos en la tabla: Subir PDF rápido, Editar y Eliminar
+    if (tbody) {
+        tbody.addEventListener("click", function (event) {
+            var uploadPdfBtn = event.target.closest(".btn-upload-pdf");
+            if (uploadPdfBtn && quickPdfInput) {
+                quickUploadTargetId = uploadPdfBtn.getAttribute("data-id");
+                quickPdfInput.value = "";
+                quickPdfInput.click();
+                return;
+            }
+
+            var editBtn = event.target.closest(".btn-edit-client");
+            if (editBtn) {
+                var tr = editBtn.closest("tr.client-row");
+                if (!tr) return;
+                formActionInput.value = "update";
+                formIdInput.value = tr.getAttribute("data-id") || "";
+                if (nombreInput) nombreInput.value = tr.getAttribute("data-nombre") || "";
+                if (emailInput) emailInput.value = tr.getAttribute("data-email") || "";
+                if (telefonoInput) telefonoInput.value = tr.getAttribute("data-telefono") || "";
+                if (sexoSelect) sexoSelect.value = tr.getAttribute("data-sexo") || "Otro";
+                if (docInput) docInput.value = "";
+                if (formHeading) formHeading.textContent = "Editar Cliente: " + (tr.getAttribute("data-nombre") || "");
+                if (submitBtn) submitBtn.textContent = "Guardar Cambios";
+                if (cancelBtn) cancelBtn.classList.remove("tx-status-hidden");
+                showFormError("");
+                if (nombreInput) nombreInput.focus();
+                return;
+            }
+
+            var deleteBtn = event.target.closest(".btn-delete-client");
+            if (deleteBtn) {
+                var rowToDelete = deleteBtn.closest("tr.client-row");
+                if (!rowToDelete) return;
+                var clientId = rowToDelete.getAttribute("data-id");
+                if (!clientId) return;
+
+                deleteBtn.disabled = true;
+                fetch(endpoint, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRFToken": csrfToken,
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Accept": "application/json"
+                    },
+                    body: JSON.stringify({
+                        action: "delete",
+                        id: parseInt(clientId, 10),
+                        page: currentPage,
+                        per_page: currentPerPage
+                    })
+                })
+                .then(function (res) {
+                    return res.json().then(function (data) {
+                        return { ok: res.ok, data: data };
+                    });
+                })
+                .then(function (result) {
+                    if (!result.ok || result.data.status !== "ok") {
+                        deleteBtn.disabled = false;
+                        showBanner(result.data.message || "Error al eliminar el cliente.", true);
+                        return;
+                    }
+                    if (Array.isArray(result.data.clientes)) {
+                        renderClientsTable(result.data.clientes);
+                    }
+                    if (result.data.pagination) {
+                        updatePaginationUI(result.data.pagination);
+                    }
+                    if (formIdInput && formIdInput.value === String(clientId)) {
+                        resetFormToCreate();
+                    }
+                    showBanner(result.data.message || "Cliente eliminado.", false);
+                })
+                .catch(function () {
+                    deleteBtn.disabled = false;
+                    showBanner("Error de red al eliminar el cliente.", true);
+                });
+            }
+        });
+    }
+
+    // Subida directa desde el botón "Subir PDF" de una fila
+    if (quickPdfInput) {
+        quickPdfInput.addEventListener("change", function () {
+            if (!quickUploadTargetId || !quickPdfInput.files || quickPdfInput.files.length === 0) {
+                return;
+            }
+            var selectedFile = quickPdfInput.files[0];
+            var validationError = validatePdfFileClientSide(selectedFile);
+            if (validationError) {
+                showBanner(validationError, true);
+                quickPdfInput.value = "";
+                return;
+            }
+
+            var fd = new FormData();
+            fd.append("action", "upload_pdf");
+            fd.append("id", String(quickUploadTargetId));
+            fd.append("documentacion", selectedFile);
+
+            fetch(endpoint, {
+                method: "POST",
+                headers: {
+                    "X-CSRFToken": csrfToken,
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Accept": "application/json"
+                },
+                body: fd
+            })
+            .then(function (res) {
+                return res.json().then(function (data) {
+                    return { ok: res.ok, data: data };
+                });
+            })
+            .then(function (result) {
+                quickPdfInput.value = "";
+                if (!result.ok || result.data.status !== "ok") {
+                    showBanner(result.data.message || "Error al subir el PDF.", true);
+                    return;
+                }
+                var updatedClient = result.data.cliente;
+                if (updatedClient && tbody) {
+                    var targetRow = tbody.querySelector("tr.client-row[data-id='" + updatedClient.id + "']");
+                    if (targetRow) {
+                        var docCell = targetRow.querySelector(".cell-doc");
+                        if (docCell) {
+                            docCell.innerHTML = buildPdfCellHTML(updatedClient);
+                        }
+                    }
+                }
+                showBanner(result.data.message || "PDF subido correctamente.", false);
+            })
+            .catch(function () {
+                quickPdfInput.value = "";
+                showBanner("Error de red al subir el archivo PDF.", true);
+            });
+        });
+    }
+
+    // Controles de paginación
+    if (perPageSelect) {
+        perPageSelect.addEventListener("change", function () {
+            var newSize = Math.min(Math.max(parseInt(perPageSelect.value, 10) || 25, 1), 100);
+            fetchClientsPage(1, newSize);
+        });
+    }
+    if (btnFirst) {
+        btnFirst.addEventListener("click", function () {
+            if (currentPage > 1) fetchClientsPage(1, currentPerPage);
+        });
+    }
+    if (btnPrev) {
+        btnPrev.addEventListener("click", function () {
+            if (currentPage > 1) fetchClientsPage(currentPage - 1, currentPerPage);
+        });
+    }
+    if (btnNext) {
+        btnNext.addEventListener("click", function () {
+            if (currentPage < totalPages) fetchClientsPage(currentPage + 1, currentPerPage);
+        });
+    }
+    if (btnLast) {
+        btnLast.addEventListener("click", function () {
+            if (currentPage < totalPages) fetchClientsPage(totalPages, currentPerPage);
+        });
+    }
+})();
+</script>
+{% endblock %}

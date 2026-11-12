@@ -3,14 +3,20 @@ Suite de pruebas unitarias y de integración para la aplicación app.
 Cubre la Landing Page, el modelo CustomUser y los flujos completos de autenticación.
 """
 
+from decimal import Decimal
+import json
+
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
 from django.core.cache import cache
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
+
+from .models import Client, Cliente, Transaction
 
 CustomUser = get_user_model()
 
@@ -383,7 +389,7 @@ class DashboardAndNavigationTests(TestCase):
         )
         self.app_routes = [
             ("app:dashboard", "app/dashboard.html", "Inicio"),
-            ("app:clients", "app/clients.html", "Clientes"),
+            ("app:clients", "app/clientes.html", "Clientes"),
             ("app:transactions", "app/transactions.html", "Transacciones"),
             ("app:metrics", "app/metrics.html", "Métricas"),
         ]
@@ -440,8 +446,329 @@ class DashboardAndNavigationTests(TestCase):
             # Verificar que el ítem activo corresponde a la interfaz actual
             self.assertContains(response, 'aria-current="page"', count=1)
             self.assertContains(response, "app-nav-link--active", count=1)
-            self.assertContains(
-                response,
-                f'<section class="blank-workspace" aria-label="{label}"></section>',
-                html=True,
-            )
+            if route_name == "app:transactions":
+                self.assertContains(response, 'id="transactions-table"')
+            elif route_name == "app:clients":
+                self.assertContains(response, 'id="clients-table"')
+            else:
+                self.assertContains(
+                    response,
+                    f'<section class="blank-workspace" aria-label="{label}"></section>',
+                    html=True,
+                )
+
+
+class TransactionModuleTests(TestCase):
+    """
+    8. Pruebas integrales para el módulo de Transacciones:
+       - Creación individual, modificación, guardado en lote ("Guardar Cambios") y eliminación.
+       - Ingesta masiva en memoria (CSV) mediante pandas sin persistencia en disco.
+       - Aislamiento estricto entre usuarios.
+    """
+
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="finanzas@empresa.com",
+            password="ContrasenaFuerte2026!",
+            is_active=True,
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="otro@empresa.com",
+            password="ContrasenaFuerte2026!",
+            is_active=True,
+        )
+        self.client_obj = Client.objects.create(
+            user=self.user, name="Corporación Austral"
+        )
+        self.url = reverse("app:transactions")
+
+    def test_create_update_bulk_save_and_delete_transactions_via_json(self):
+        self.client.force_login(self.user)
+
+        # 1. Crear transacción individual pasando el nombre de un cliente nuevo
+        res_create = self.client.post(
+            self.url,
+            data=json.dumps(
+                {
+                    "action": "create",
+                    "date": "2026-11-09",
+                    "vertical": "Consultoría Financiera",
+                    "transaction_type": "INGRESO",
+                    "concept": "Honorarios Mensuales",
+                    "client": "Grupo Pampa S.A.",
+                    "detail": "Abono noviembre Profit First",
+                    "amount": "150000.50",
+                    "currency": "ARS",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res_create.status_code, 201)
+        data_create = res_create.json()
+        self.assertEqual(data_create["status"], "ok")
+        tx_id = data_create["transaction"]["id"]
+        created_client = Client.objects.get(user=self.user, name="Grupo Pampa S.A.")
+        self.assertEqual(data_create["transaction"]["client"], created_client.id)
+        self.assertEqual(data_create["transaction"]["vertical"], "Consultoría Financiera")
+        self.assertEqual(data_create["transaction"]["detail"], "Abono noviembre Profit First")
+        self.assertEqual(data_create["transaction"]["currency"], "ARS")
+
+        # 2. Modificar transacción individual (cambiando a USD y cliente existente por ID)
+        res_update = self.client.post(
+            self.url,
+            data=json.dumps(
+                {
+                    "action": "update",
+                    "id": tx_id,
+                    "date": "2026-11-09",
+                    "vertical": "Inversiones Balanz",
+                    "transaction_type": "INGRESO",
+                    "concept": "Honorarios Estructuración",
+                    "client": self.client_obj.id,
+                    "detail": "Cartera dolarizada",
+                    "amount": "1200.00",
+                    "currency": "USD",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res_update.status_code, 200)
+        updated_tx = Transaction.objects.get(pk=tx_id)
+        self.assertEqual(Decimal(updated_tx.amount), Decimal("1200.00"))
+        self.assertEqual(updated_tx.currency, "USD")
+        self.assertEqual(updated_tx.client_id, self.client_obj.id)
+
+        # 3. Guardar Cambios en lote (bulk_save: actualiza existente + crea nueva fila de Gasto)
+        res_bulk = self.client.post(
+            self.url,
+            data=json.dumps(
+                {
+                    "action": "bulk_save",
+                    "rows": [
+                        {
+                            "id": tx_id,
+                            "date": "2026-11-09",
+                            "vertical": "Inversiones Balanz",
+                            "transaction_type": "INGRESO",
+                            "concept": "Honorarios Estructuración",
+                            "client": "Corporación Austral",
+                            "detail": "Confirmado en cuenta",
+                            "amount": "1250.00",
+                            "currency": "USD",
+                        },
+                        {
+                            "id": None,
+                            "date": "2026-11-09",
+                            "vertical": "Operaciones",
+                            "transaction_type": "GASTO",
+                            "concept": "Licencias Software",
+                            "client": "",
+                            "detail": "Servidor AWS EC2",
+                            "amount": "42500.75",
+                            "currency": "ARS",
+                        },
+                    ],
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res_bulk.status_code, 200)
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 2)
+
+        # 4. Eliminar transacción
+        res_delete = self.client.post(
+            self.url,
+            data=json.dumps({"action": "delete", "id": tx_id}),
+            content_type="application/json",
+        )
+        self.assertEqual(res_delete.status_code, 200)
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 1)
+
+    def test_in_memory_csv_upload_with_pandas_8_columns(self):
+        self.client.force_login(self.user)
+        csv_content = (
+            "Fecha,Vertical,Tipo,Concepto,Cliente,Detalle,Monto,Moneda\n"
+            "2026-11-01,Consultoría,Ingreso,Abono Mensual,Cliente Norte,Cuota 1 de 6,\"$ 250.000,50\",ARS\n"
+            "2026-11-02,Infraestructura,Gasto,Servidores,,Instancia t4g.small,15.00,USD\n"
+        ).encode("utf-8")
+        uploaded = SimpleUploadedFile(
+            "flujo_noviembre.csv", csv_content, content_type="text/csv"
+        )
+
+        response = self.client.post(
+            self.url,
+            {"action": "bulk_upload", "file": uploaded},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["imported_count"], 2)
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 2)
+
+        norte_client = Client.objects.get(user=self.user, name="Cliente Norte")
+        tx_ingreso = Transaction.objects.get(
+            user=self.user, transaction_type="INGRESO"
+        )
+        self.assertEqual(tx_ingreso.client_id, norte_client.id)
+        self.assertEqual(tx_ingreso.vertical, "Consultoría")
+        self.assertEqual(tx_ingreso.detail, "Cuota 1 de 6")
+        self.assertEqual(tx_ingreso.currency, "ARS")
+
+        tx_gasto = Transaction.objects.get(user=self.user, transaction_type="GASTO")
+        self.assertIsNone(tx_gasto.client_id)
+        self.assertEqual(tx_gasto.currency, "USD")
+        self.assertEqual(tx_gasto.amount, Decimal("15.00"))
+
+    def test_pagination_default_25_and_max_100_cap(self):
+        self.client.force_login(self.user)
+        Transaction.objects.bulk_create(
+            [
+                Transaction(
+                    user=self.user,
+                    date="2026-11-01",
+                    vertical="Operaciones",
+                    transaction_type="INGRESO",
+                    concept=f"Operación #{i}",
+                    amount=Decimal("100.00"),
+                    currency="ARS",
+                )
+                for i in range(1, 121)
+            ]
+        )
+
+        # Por defecto muestra 25 filas (total 120 -> 5 páginas)
+        res_default = self.client.get(
+            self.url, HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        self.assertEqual(res_default.status_code, 200)
+        data_default = res_default.json()
+        self.assertEqual(len(data_default["transactions"]), 25)
+        self.assertEqual(data_default["pagination"]["per_page"], 25)
+        self.assertEqual(data_default["pagination"]["total_count"], 120)
+        self.assertEqual(data_default["pagination"]["total_pages"], 5)
+
+        # Solicitar per_page=500 se limita estrictamente a 100 filas
+        res_capped = self.client.get(
+            f"{self.url}?page=1&per_page=500",
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(res_capped.status_code, 200)
+        data_capped = res_capped.json()
+        self.assertEqual(len(data_capped["transactions"]), 100)
+        self.assertEqual(data_capped["pagination"]["per_page"], 100)
+        self.assertEqual(data_capped["pagination"]["total_pages"], 2)
+
+
+class ClienteModuleTests(TestCase):
+    """
+    9. Pruebas integrales para el módulo de Clientes:
+       - Creación, edición y eliminación de clientes.
+       - Validación estricta de documentación PDF (extensión .pdf y peso máx. 10 MB / 10.485.760 bytes).
+    """
+
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="cartera@empresa.com",
+            password="ContrasenaFuerte2026!",
+            is_active=True,
+        )
+        self.url = reverse("app:clients")
+
+    def test_create_edit_and_delete_cliente_with_valid_pdf(self):
+        self.client.force_login(self.user)
+        valid_pdf = SimpleUploadedFile(
+            "legajo_cliente.pdf",
+            b"%PDF-1.4 contenido de prueba",
+            content_type="application/pdf",
+        )
+
+        # 1. Crear cliente con PDF válido
+        res_create = self.client.post(
+            self.url,
+            {
+                "action": "create",
+                "nombre_completo": "Martín Echeverría",
+                "email": "Martin@Empresa.com",
+                "telefono": "+54 9 11 4455-6677",
+                "sexo": "M",
+                "documentacion": valid_pdf,
+            },
+        )
+        self.assertEqual(res_create.status_code, 201)
+        payload = res_create.json()
+        self.assertEqual(payload["status"], "ok")
+        client_id = payload["cliente"]["id"]
+        self.assertTrue(payload["cliente"]["has_pdf"])
+
+        cliente_db = Cliente.objects.get(pk=client_id)
+        self.assertEqual(cliente_db.nombre_completo, "Martín Echeverría")
+        self.assertEqual(cliente_db.email, "martin@empresa.com")
+        self.assertEqual(cliente_db.sexo, "M")
+
+        # 2. Editar cliente
+        res_update = self.client.post(
+            self.url,
+            {
+                "action": "update",
+                "id": client_id,
+                "nombre_completo": "Martín Echeverría S.R.L.",
+                "email": "contacto@echeverria.com",
+                "telefono": "11 9988-7766",
+                "sexo": "Otro",
+            },
+        )
+        self.assertEqual(res_update.status_code, 200)
+        cliente_db.refresh_from_db()
+        self.assertEqual(cliente_db.nombre_completo, "Martín Echeverría S.R.L.")
+        self.assertEqual(cliente_db.sexo, "Otro")
+
+        # 3. Eliminar cliente
+        res_delete = self.client.post(
+            self.url,
+            data=json.dumps({"action": "delete", "id": client_id}),
+            content_type="application/json",
+        )
+        self.assertEqual(res_delete.status_code, 200)
+        self.assertFalse(Cliente.objects.filter(pk=client_id).exists())
+
+    def test_reject_pdf_exceeding_10mb_and_non_pdf_extension(self):
+        self.client.force_login(self.user)
+
+        # 1. Rechazar archivo con extensión distinta de .pdf
+        invalid_ext = SimpleUploadedFile(
+            "documento.txt",
+            b"texto plano no permitido",
+            content_type="text/plain",
+        )
+        res_ext = self.client.post(
+            self.url,
+            {
+                "action": "create",
+                "nombre_completo": "Cliente Formato Inválido",
+                "sexo": "F",
+                "documentacion": invalid_ext,
+            },
+        )
+        self.assertEqual(res_ext.status_code, 400)
+        self.assertIn(".pdf", res_ext.json()["message"])
+
+        # 2. Rechazar PDF que supere 10 MB (10.485.760 bytes)
+        oversized_pdf = SimpleUploadedFile(
+            "pesado.pdf",
+            b"%PDF-1.4 " + (b"0" * 10485760),
+            content_type="application/pdf",
+        )
+        res_size = self.client.post(
+            self.url,
+            {
+                "action": "create",
+                "nombre_completo": "Cliente PDF Excedido",
+                "sexo": "M",
+                "documentacion": oversized_pdf,
+            },
+        )
+        self.assertEqual(res_size.status_code, 400)
+        self.assertIn("10 MB", res_size.json()["message"])
+        self.assertFalse(
+            Cliente.objects.filter(nombre_completo="Cliente PDF Excedido").exists()
+        )

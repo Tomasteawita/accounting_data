@@ -728,6 +728,444 @@ body {
 }
 
 /* ==========================================================================
+   7. Módulo de Transacciones — Hoja de Cálculo Editable e Ingesta en Memoria
+   ========================================================================== */
+.tx-module {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    width: 100%;
+}
+
+.tx-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border-tech);
+}
+
+.tx-title {
+    font-family: var(--font-sans);
+    font-size: 1.5rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+}
+
+.tx-status-hidden {
+    display: none;
+}
+
+.alert-stoic--error {
+    background-color: #E5E7EB;
+    border-left-width: 6px;
+    border-left-color: #111827;
+    font-weight: 600;
+}
+
+.tx-hidden-form {
+    display: none;
+}
+
+/* Panel de Ingesta Masiva (CSV / Excel) */
+.tx-upload-panel {
+    background-color: var(--bg-surface-white);
+    border: 1px solid var(--border-tech);
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.tx-panel-heading {
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 0.25rem;
+}
+
+.tx-panel-help {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    line-height: 1.45;
+}
+
+.tx-panel-help code {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    background-color: var(--bg-surface-subtle);
+    padding: 0.125rem 0.375rem;
+    border: 1px solid var(--border-tech);
+}
+
+.tx-upload-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.file-input-stoic {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    padding: 0.5rem;
+    background-color: var(--bg-primary);
+}
+
+/* Barra de Herramientas de la Hoja de Cálculo */
+.sheet-toolbar {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    background-color: var(--bg-surface-white);
+    border: 1px solid var(--border-tech);
+    padding: 0.875rem 1rem;
+}
+
+.sheet-toolbar-left,
+.sheet-toolbar-right {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+}
+
+.sheet-dirty-badge {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    padding: 0.375rem 0.625rem;
+    background-color: var(--bg-primary);
+    border: 1px solid var(--border-soft);
+    text-align: center;
+}
+
+.sheet-dirty-badge--active {
+    color: var(--text-primary);
+    font-weight: 700;
+    border-color: var(--border-accent);
+    background-color: var(--bg-surface-subtle);
+}
+
+/* Tabla Tipo Hoja de Cálculo Contable */
+.sheet-container {
+    background-color: var(--bg-surface-white);
+    border: 1px solid var(--border-accent);
+}
+
+.table-responsive-wrapper {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.sheet-table {
+    width: 100%;
+    min-width: 1080px;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+}
+
+.sheet-table thead th {
+    background-color: var(--bg-surface-subtle);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    text-align: left;
+    padding: 0.75rem 0.625rem;
+    border-bottom: 2px solid var(--border-accent);
+    border-right: 1px solid var(--border-tech);
+}
+
+.sheet-table thead th:last-child {
+    border-right: none;
+}
+
+.sheet-table thead th.col-amount {
+    text-align: right;
+}
+
+.sheet-table tbody td {
+    padding: 0.375rem;
+    border-bottom: 1px solid var(--border-tech);
+    border-right: 1px solid var(--border-soft);
+    vertical-align: middle;
+    background-color: var(--bg-surface-white);
+}
+
+.sheet-table tbody td:last-child {
+    border-right: none;
+}
+
+.sheet-row.is-editing td {
+    background-color: var(--bg-primary);
+}
+
+.col-date {
+    width: 135px;
+}
+
+.col-vertical {
+    width: 140px;
+}
+
+.col-type {
+    width: 105px;
+}
+
+.col-concept {
+    min-width: 155px;
+}
+
+.col-client {
+    width: 155px;
+}
+
+.col-detail {
+    min-width: 175px;
+}
+
+.col-amount {
+    width: 130px;
+}
+
+.col-currency {
+    width: 90px;
+}
+
+.col-actions {
+    width: 165px;
+}
+
+/* Inputs y Selects de Celdas */
+.sheet-input,
+.sheet-select {
+    width: 100%;
+    min-height: 38px;
+    padding: 0.375rem 0.5rem;
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    color: var(--text-primary);
+    background-color: var(--bg-surface-white);
+    border: 1px solid var(--border-tech);
+    border-radius: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.sheet-input--num {
+    font-family: var(--font-mono);
+    text-align: right;
+    font-weight: 600;
+}
+
+.sheet-input:disabled,
+.sheet-select:disabled {
+    background-color: transparent;
+    border-color: transparent;
+    color: var(--text-primary);
+    opacity: 1;
+    cursor: default;
+    -webkit-text-fill-color: var(--text-primary);
+}
+
+.sheet-input:focus,
+.sheet-select:focus {
+    outline: none;
+    border-color: var(--border-accent);
+    background-color: var(--bg-surface-white);
+}
+
+/* Acciones por Fila */
+.row-actions-group {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+}
+
+.btn-row-action {
+    flex: 1;
+    min-height: 36px;
+    padding: 0.25rem 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    background-color: var(--bg-surface-white);
+    border: 1px solid var(--border-tech);
+    cursor: pointer;
+}
+
+.btn-row-action:hover,
+.btn-row-action:focus-visible {
+    background-color: var(--bg-surface-subtle);
+    border-color: var(--border-accent);
+    outline: none;
+}
+
+.btn-row-action--active {
+    background-color: var(--text-primary);
+    color: var(--bg-primary);
+    border-color: var(--text-primary);
+}
+
+.sheet-empty-cell {
+    padding: 2rem 1rem !important;
+    text-align: center;
+    font-size: 0.9375rem;
+    color: var(--text-secondary);
+    background-color: var(--bg-primary) !important;
+}
+
+/* Navegador de Páginas Contable (.sheet-pagination) */
+.sheet-pagination {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.875rem 1rem;
+    background-color: var(--bg-surface-subtle);
+    border-top: 1px solid var(--border-accent);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+}
+
+.pagination-size-control,
+.pagination-nav-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.pagination-label {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.pagination-select {
+    width: auto;
+    min-width: 72px;
+    min-height: 36px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+}
+
+.pagination-summary {
+    color: var(--text-secondary);
+}
+
+.pagination-page-indicator {
+    padding: 0.25rem 0.625rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.pagination-btn {
+    flex: 0 0 auto;
+    width: auto;
+    padding: 0.375rem 0.75rem;
+}
+
+.pagination-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    background-color: var(--bg-primary);
+    border-color: var(--border-tech);
+}
+
+/* ==========================================================================
+   8. Módulo de Clientes — Formulario Contable, Tabla y Badge PDF Minimalista
+   ========================================================================== */
+.client-grid-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.client-form-fields {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.875rem;
+}
+
+.client-form-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+}
+
+.clients-sheet-table {
+    min-width: 820px;
+}
+
+.col-client-name {
+    min-width: 200px;
+}
+
+.col-client-email {
+    min-width: 190px;
+}
+
+.col-client-phone {
+    width: 150px;
+}
+
+.col-client-sex {
+    width: 90px;
+}
+
+.col-client-doc {
+    width: 150px;
+}
+
+.cell-static {
+    padding: 0.625rem 0.75rem !important;
+    font-size: 0.875rem;
+    color: var(--text-primary);
+}
+
+.cell-static--strong {
+    font-weight: 600;
+}
+
+.cell-static--mono {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+}
+
+/* Enlace minimalista de PDF Subido */
+.pdf-uploaded-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    min-height: 34px;
+    padding: 0.25rem 0.625rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    background-color: var(--bg-surface-subtle);
+    border: 1px solid var(--border-accent);
+    text-decoration: none;
+}
+
+.pdf-uploaded-link:hover,
+.pdf-uploaded-link:focus-visible {
+    background-color: var(--text-primary);
+    color: var(--bg-primary);
+    outline: none;
+}
+
+.pdf-icon-svg {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
+/* ==========================================================================
    Media Queries — Escalado a Tablet / Desktop (>= 768px)
    ========================================================================== */
 @media (min-width: 768px) {
@@ -840,5 +1278,65 @@ body {
 
     .app-main {
         padding: 2rem 2.5rem;
+    }
+
+    .tx-title {
+        font-size: 1.75rem;
+    }
+
+    .tx-upload-controls {
+        flex-direction: row;
+        align-items: center;
+    }
+
+    .tx-upload-controls .file-input-stoic {
+        flex: 1;
+    }
+
+    .tx-upload-btn {
+        width: auto;
+        min-width: 190px;
+    }
+
+    .sheet-toolbar {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    .sheet-toolbar-left,
+    .sheet-toolbar-right {
+        flex-direction: row;
+        align-items: center;
+    }
+
+    .sheet-add-btn,
+    .sheet-save-btn {
+        width: auto;
+    }
+
+    .sheet-pagination {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    .client-form-fields {
+        grid-template-columns: repeat(3, 1fr);
+    }
+
+    .client-form-file-group {
+        grid-column: span 2;
+    }
+
+    .client-form-actions {
+        flex-direction: row;
+        align-items: center;
+    }
+
+    .client-submit-btn,
+    .client-cancel-btn {
+        width: auto;
+        min-width: 180px;
     }
 }
