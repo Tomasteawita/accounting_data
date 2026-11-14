@@ -446,7 +446,9 @@ class DashboardAndNavigationTests(TestCase):
             # Verificar que el ítem activo corresponde a la interfaz actual
             self.assertContains(response, 'aria-current="page"', count=1)
             self.assertContains(response, "app-nav-link--active", count=1)
-            if route_name == "app:transactions":
+            if route_name == "app:dashboard":
+                self.assertContains(response, 'id="pnl-table"')
+            elif route_name == "app:transactions":
                 self.assertContains(response, 'id="transactions-table"')
             elif route_name == "app:clients":
                 self.assertContains(response, 'id="clients-table"')
@@ -772,3 +774,234 @@ class ClienteModuleTests(TestCase):
         self.assertFalse(
             Cliente.objects.filter(nombre_completo="Cliente PDF Excedido").exists()
         )
+
+
+class PnLDashboardTests(TestCase):
+    """
+    10. Pruebas unitarias y de integración para el Estado de Resultados (P&L Mensual)
+        en `dashboard_view`:
+        - Cálculo exacto de Ingresos, OPEX, EBITDA, Margen EBITDA %, CAPEX/Deuda y
+          Resultado Neto de Caja (Flujo Libre) con `decimal.Decimal`.
+        - Clasificación contable de `Estructura` y `Deuda` como No Operativos y ordenamiento
+          descendente por monto anual acumulado.
+        - Manejo seguro de meses con Ingresos = 0 (`0.0%` sin `ZeroDivisionError`).
+        - Filtros por Año, Moneda (`ARS`/`USD`), Vertical y aislamiento entre usuarios.
+    """
+
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="cfo@empresa.com",
+            password="ContrasenaFuerte2026!",
+            is_active=True,
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="externo@empresa.com",
+            password="ContrasenaFuerte2026!",
+            is_active=True,
+        )
+        self.url = reverse("app:dashboard")
+
+        # Transacciones de Enero 2026 (ARS, Vertical Academia)
+        Transaction.objects.bulk_create(
+            [
+                Transaction(
+                    user=self.user,
+                    date="2026-01-10",
+                    vertical="Academia",
+                    transaction_type=Transaction.TransactionType.INCOME,
+                    concept="Cuota Alumnos",
+                    amount=Decimal("1000000.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                Transaction(
+                    user=self.user,
+                    date="2026-01-15",
+                    vertical="Academia",
+                    transaction_type=Transaction.TransactionType.INCOME,
+                    concept="Otros Ingresos",
+                    amount=Decimal("200000.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                Transaction(
+                    user=self.user,
+                    date="2026-01-20",
+                    vertical="Academia",
+                    transaction_type=Transaction.TransactionType.EXPENSE,
+                    concept="Sueldo",
+                    amount=Decimal("400000.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                Transaction(
+                    user=self.user,
+                    date="2026-01-22",
+                    vertical="Academia",
+                    transaction_type=Transaction.TransactionType.EXPENSE,
+                    concept="Alquiler",
+                    amount=Decimal("200000.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                Transaction(
+                    user=self.user,
+                    date="2026-01-25",
+                    vertical="Academia",
+                    transaction_type=Transaction.TransactionType.EXPENSE,
+                    concept="Luz",
+                    amount=Decimal("60000.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                # Gastos No Operativos (CAPEX y Servicio de Deuda) con variantes de mayúsculas
+                Transaction(
+                    user=self.user,
+                    date="2026-01-28",
+                    vertical="Academia",
+                    transaction_type=Transaction.TransactionType.EXPENSE,
+                    concept="Estructura",
+                    amount=Decimal("100000.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                Transaction(
+                    user=self.user,
+                    date="2026-01-29",
+                    vertical="Academia",
+                    transaction_type=Transaction.TransactionType.EXPENSE,
+                    concept="DEUDA",
+                    amount=Decimal("80000.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                # Febrero 2026: Mes con 0 ingresos y gasto operativo para probar margen 0.0% sin ZeroDivisionError
+                Transaction(
+                    user=self.user,
+                    date="2026-02-10",
+                    vertical="Consultoría",
+                    transaction_type=Transaction.TransactionType.EXPENSE,
+                    concept="Sueldo",
+                    amount=Decimal("50000.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                # Transacción en USD (no debe mezclarse con el reporte ARS)
+                Transaction(
+                    user=self.user,
+                    date="2026-01-12",
+                    vertical="Consultoría",
+                    transaction_type=Transaction.TransactionType.INCOME,
+                    concept="Honorarios Internacionales",
+                    amount=Decimal("3000.00"),
+                    currency=Transaction.Currency.USD,
+                ),
+                # Transacción de otro usuario (no debe filtrarse al P&L de self.user)
+                Transaction(
+                    user=self.other_user,
+                    date="2026-01-10",
+                    vertical="Academia",
+                    transaction_type=Transaction.TransactionType.INCOME,
+                    concept="Cuota Alumnos",
+                    amount=Decimal("9999999.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+            ]
+        )
+
+    def test_pnl_ebitda_and_net_result_exact_decimal_calculations(self):
+        self.client.force_login(self.user)
+        response = self.client.get(f"{self.url}?year=2026&currency=ARS")
+        self.assertEqual(response.status_code, 200)
+
+        pnl = response.context["pnl"]
+        kpis = response.context["kpis"]
+
+        # 1. Ingresos Operativos: Enero = 1.200.000,00 | Febrero = 0,00 | Total Anual = 1.200.000,00
+        self.assertEqual(pnl["total_income"]["monthly"][0], Decimal("1200000.00"))
+        self.assertEqual(pnl["total_income"]["monthly"][1], Decimal("0.00"))
+        self.assertEqual(pnl["total_income"]["annual_total"], Decimal("1200000.00"))
+        self.assertEqual(pnl["total_income"]["vertical_pct"], Decimal("100.0"))
+
+        # Orden de mayor a menor en Ingresos: Cuota Alumnos (1.000.000) -> Otros Ingresos (200.000)
+        income_concepts = [r["concept"] for r in pnl["income_rows"]]
+        self.assertEqual(income_concepts, ["Cuota Alumnos", "Otros Ingresos"])
+
+        # 2. OPEX: Enero = 660.000,00 | Febrero = 50.000,00 | Total Anual = 710.000,00 (59.2% s/ Ingresos)
+        self.assertEqual(pnl["total_opex"]["monthly"][0], Decimal("660000.00"))
+        self.assertEqual(pnl["total_opex"]["monthly"][1], Decimal("50000.00"))
+        self.assertEqual(pnl["total_opex"]["annual_total"], Decimal("710000.00"))
+        self.assertEqual(pnl["total_opex"]["vertical_pct"], Decimal("59.2"))
+
+        # Orden de mayor a menor en OPEX: Sueldo (450.000) -> Alquiler (200.000) -> Luz (60.000)
+        opex_concepts = [r["concept"] for r in pnl["opex_rows"]]
+        self.assertEqual(opex_concepts, ["Sueldo", "Alquiler", "Luz"])
+
+        # 3. EBITDA: Enero = 1.200.000 - 660.000 = 540.000 (45.0%)
+        #    Febrero = 0 - 50.000 = -50.000 (Margen 0.0% por ingresos 0)
+        #    Total Anual = 1.200.000 - 710.000 = 490.000,00 (40.8%)
+        self.assertEqual(pnl["ebitda"]["monthly"][0], Decimal("540000.00"))
+        self.assertEqual(pnl["ebitda"]["monthly"][1], Decimal("-50000.00"))
+        self.assertEqual(pnl["ebitda"]["annual_total"], Decimal("490000.00"))
+        self.assertEqual(pnl["ebitda"]["vertical_pct"], Decimal("40.8"))
+        self.assertEqual(pnl["ebitda_margin"]["monthly"][0], Decimal("45.0"))
+        self.assertEqual(pnl["ebitda_margin"]["monthly"][1], Decimal("0.0"))
+        self.assertEqual(pnl["ebitda_margin"]["annual_total"], Decimal("40.8"))
+
+        # 4. CAPEX y Servicio de Deuda (No Operativo): Estructura (100.000) + Deuda (80.000) = 180.000,00 (15.0%)
+        non_op_norms = [r["normalized_concept"] for r in pnl["non_operating_rows"]]
+        self.assertEqual(non_op_norms, ["estructura", "deuda"])
+        self.assertEqual(pnl["total_non_operating"]["monthly"][0], Decimal("180000.00"))
+        self.assertEqual(pnl["total_non_operating"]["annual_total"], Decimal("180000.00"))
+        self.assertEqual(pnl["total_non_operating"]["vertical_pct"], Decimal("15.0"))
+
+        # 5. Resultado Neto de Caja (Flujo Libre):
+        #    Enero = 540.000 - 180.000 = 360.000,00 (30.0%)
+        #    Febrero = -50.000 - 0 = -50.000,00 (Margen 0.0% por ingresos 0)
+        #    Total Anual = 490.000 - 180.000 = 310.000,00 (25.8%)
+        self.assertEqual(pnl["net_result"]["monthly"][0], Decimal("360000.00"))
+        self.assertEqual(pnl["net_result"]["monthly"][1], Decimal("-50000.00"))
+        self.assertEqual(pnl["net_result"]["annual_total"], Decimal("310000.00"))
+        self.assertEqual(pnl["net_result"]["vertical_pct"], Decimal("25.8"))
+        self.assertEqual(pnl["net_margin"]["monthly"][0], Decimal("30.0"))
+        self.assertEqual(pnl["net_margin"]["monthly"][1], Decimal("0.0"))
+        self.assertEqual(pnl["net_margin"]["annual_total"], Decimal("25.8"))
+
+        # Verificar KPIs superiores, formateo contable argentino y controles Mobile-First
+        self.assertEqual(kpis["total_income"], Decimal("1200000.00"))
+        self.assertEqual(kpis["total_opex"], Decimal("710000.00"))
+        self.assertEqual(kpis["ebitda"], Decimal("490000.00"))
+        self.assertEqual(kpis["net_result"], Decimal("310000.00"))
+        self.assertContains(response, "1.200.000,00")
+        self.assertContains(response, "490.000,00")
+        self.assertContains(response, "310.000,00")
+        self.assertContains(response, "490.000")
+        self.assertContains(response, "310.000")
+        self.assertContains(response, "490000.00")
+        self.assertContains(response, "310000.00")
+        self.assertContains(response, "0.0%")
+        self.assertContains(response, 'id="btn-toggle-granularity"')
+        self.assertContains(response, 'data-toggle-block="income"')
+        self.assertContains(response, 'data-toggle-block="opex"')
+        self.assertContains(response, 'data-toggle-block="non_operating"')
+        self.assertContains(response, "pnl-table--annual-only")
+        self.assertContains(response, "Vista: Consolidado Anual")
+        self.assertContains(response, "Vista: Mensual (Ene-Dic)")
+
+    def test_pnl_filters_by_vertical_and_currency(self):
+        self.client.force_login(self.user)
+
+        # Filtrar por vertical "Academia" en ARS (excluye los 50.000 de Sueldo en Consultoría de Febrero)
+        res_academia = self.client.get(
+            f"{self.url}?year=2026&currency=ARS&vertical=Academia"
+        )
+        self.assertEqual(res_academia.status_code, 200)
+        pnl_acad = res_academia.context["pnl"]
+        self.assertEqual(pnl_acad["total_income"]["annual_total"], Decimal("1200000.00"))
+        self.assertEqual(pnl_acad["total_opex"]["annual_total"], Decimal("660000.00"))
+        self.assertEqual(pnl_acad["ebitda"]["annual_total"], Decimal("540000.00"))
+        self.assertEqual(pnl_acad["net_result"]["annual_total"], Decimal("360000.00"))
+        self.assertEqual(pnl_acad["net_margin"]["annual_total"], Decimal("30.0"))
+
+        # Filtrar por moneda "USD"
+        res_usd = self.client.get(f"{self.url}?year=2026&currency=USD")
+        self.assertEqual(res_usd.status_code, 200)
+        pnl_usd = res_usd.context["pnl"]
+        self.assertEqual(pnl_usd["total_income"]["annual_total"], Decimal("3000.00"))
+        self.assertEqual(pnl_usd["total_opex"]["annual_total"], Decimal("0.00"))
+        self.assertEqual(pnl_usd["ebitda"]["annual_total"], Decimal("3000.00"))
+        self.assertEqual(pnl_usd["net_result"]["annual_total"], Decimal("3000.00"))
+        self.assertEqual(pnl_usd["net_margin"]["annual_total"], Decimal("100.0"))
+

@@ -1,7 +1,422 @@
 {% extends "app/app_base.html" %}
+{% load accounting_tags %}
 
-{% block title %}Inicio — Tomas Cueva{% endblock %}
+{% block title %}Inicio — Estado de Resultados (P&amp;L) — Tomas Cueva{% endblock %}
 
 {% block content %}
-<section class="blank-workspace" aria-label="Inicio"></section>
+<section class="pnl-module" aria-label="Inicio">
+    <!-- Encabezado Contable del Módulo P&L -->
+    <header class="pnl-header">
+        <div class="pnl-header-titles">
+            <span class="section-tag">[ ESTADO DE RESULTADOS MATRICIAL: P&amp;L MENSUAL ]</span>
+            <h1 class="tx-title">Estado de Resultados (P&amp;L Mensual)</h1>
+            <p class="pnl-subtitle">
+                Ejercicio {{ selected_year }} &middot; Moneda: <strong>{{ selected_currency }}</strong> &middot; Vertical: <strong>{% if selected_vertical %}{{ selected_vertical }}{% else %}Todas{% endif %}</strong>
+            </p>
+        </div>
+
+        <!-- Barra de Filtros Superior (Formulario GET) -->
+        <form id="pnl-filter-form" method="get" action="{% url 'app:dashboard' %}" class="pnl-filter-bar" aria-label="Filtros del Estado de Resultados">
+            <div class="pnl-filter-group">
+                <label for="filter-year" class="pnl-filter-label">Año</label>
+                <select id="filter-year" name="year" class="sheet-select pnl-filter-select">
+                    {% for year_opt in available_years %}
+                        <option value="{{ year_opt }}" {% if year_opt == selected_year %}selected{% endif %}>{{ year_opt }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="pnl-filter-group">
+                <label for="filter-currency" class="pnl-filter-label">Moneda</label>
+                <select id="filter-currency" name="currency" class="sheet-select pnl-filter-select">
+                    {% for code, label in currencies %}
+                        <option value="{{ code }}" {% if code == selected_currency %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="pnl-filter-group">
+                <label for="filter-vertical" class="pnl-filter-label">Vertical</label>
+                <select id="filter-vertical" name="vertical" class="sheet-select pnl-filter-select">
+                    <option value="" {% if not selected_vertical %}selected{% endif %}>Todas</option>
+                    {% for vert in available_verticals %}
+                        <option value="{{ vert }}" {% if vert == selected_vertical %}selected{% endif %}>{{ vert }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="pnl-filter-actions">
+                <button type="submit" class="btn-primary pnl-filter-submit">Aplicar</button>
+            </div>
+        </form>
+    </header>
+
+    <!-- Tarjetas KPI Superiores (Grilla 2x2 compacta en Mobile / 4 col en Desktop) -->
+    <section class="kpi-grid pnl-kpi-grid" aria-label="Indicadores clave del ejercicio">
+        <article class="pnl-kpi-card">
+            <span class="pnl-kpi-label">Ingresos Totales</span>
+            <strong class="pnl-kpi-value" data-raw="{{ kpis.total_income|stringformat:'.2f' }}">{{ selected_currency }} {{ kpis.total_income|ar_currency:2 }}</strong>
+            <span class="pnl-kpi-meta">Base 100.0% ({{ selected_year }})</span>
+        </article>
+
+        <article class="pnl-kpi-card">
+            <span class="pnl-kpi-label">OPEX Total</span>
+            <strong class="pnl-kpi-value" data-raw="{{ kpis.total_opex|stringformat:'.2f' }}">{{ selected_currency }} {{ kpis.total_opex|ar_currency:2 }}</strong>
+            <span class="pnl-kpi-meta">{{ kpis.opex_pct|stringformat:".1f" }}% s/ Ingresos</span>
+        </article>
+
+        <article class="pnl-kpi-card pnl-kpi-card--accent">
+            <span class="pnl-kpi-label">EBITDA Operativo ({{ selected_currency }} y %)</span>
+            <strong class="pnl-kpi-value" data-raw="{{ kpis.ebitda|stringformat:'.2f' }}">{{ selected_currency }} {{ kpis.ebitda|ar_currency:2 }}</strong>
+            <span class="pnl-kpi-meta">Margen EBITDA: <strong>{{ kpis.ebitda_margin|stringformat:".1f" }}%</strong></span>
+        </article>
+
+        <article class="pnl-kpi-card pnl-kpi-card--accent">
+            <span class="pnl-kpi-label">Resultado Neto Final ({{ selected_currency }} y %)</span>
+            <strong class="pnl-kpi-value" data-raw="{{ kpis.net_result|stringformat:'.2f' }}">{{ selected_currency }} {{ kpis.net_result|ar_currency:2 }}</strong>
+            <span class="pnl-kpi-meta">Margen Neto: <strong>{{ kpis.net_margin|stringformat:".1f" }}%</strong></span>
+        </article>
+    </section>
+
+    <!-- Barra de Controles de Visualización de Tabla (Modo Anual/Mensual + Granularidad) -->
+    <div class="pnl-table-toolbar" role="toolbar" aria-label="Controles de visualización del Estado de Resultados">
+        <div class="pnl-view-switcher" role="group" aria-label="Selector de horizonte temporal en móvil">
+            <button
+                type="button"
+                id="btn-view-annual"
+                class="pnl-view-tab is-active"
+                data-pnl-view="annual"
+                aria-pressed="true">
+                Vista: Consolidado Anual
+            </button>
+            <button
+                type="button"
+                id="btn-view-monthly"
+                class="pnl-view-tab"
+                data-pnl-view="monthly"
+                aria-pressed="false">
+                Vista: Mensual (Ene-Dic)
+            </button>
+        </div>
+
+        <div class="pnl-granularity-control">
+            <button
+                type="button"
+                id="btn-toggle-granularity"
+                class="pnl-granularity-btn"
+                aria-expanded="false">
+                Ver detalle granular
+            </button>
+        </div>
+    </div>
+
+    <!-- Tabla Matricial de Estado de Resultados (12 Meses + Total Anual + Análisis Vertical) -->
+    <div class="pnl-sheet-container">
+        <div class="table-responsive">
+            <table id="pnl-table" class="pnl-table pnl-table--annual-only" aria-label="Matriz de Estado de Resultados Mensual">
+                <thead>
+                    <tr>
+                        <th scope="col" class="col-sticky-concept">Concepto</th>
+                        {% for month_label in month_headers %}
+                            <th scope="col" class="col-pnl-month col-month">{{ month_label }}</th>
+                        {% endfor %}
+                        <th scope="col" class="col-pnl-total">Total Anual</th>
+                        <th scope="col" class="col-pnl-pct" title="Porcentaje sobre Ingresos">% s/ Ing.</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- =========================================================
+                         ESCALÓN 1: INGRESOS OPERATIVOS
+                         ========================================================= -->
+                    <tr class="pnl-section-header-row" data-block="income">
+                        <th scope="colgroup" class="col-sticky-concept">1. INGRESOS OPERATIVOS</th>
+                        <td colspan="12" class="pnl-section-spacer col-month"></td>
+                        <td colspan="2" class="pnl-section-spacer"></td>
+                    </tr>
+                    {% for row in pnl.income_rows %}
+                    <tr class="pnl-item-row pnl-concept-row" data-block="income" data-concept="{{ row.normalized_concept }}">
+                        <th scope="row" class="col-sticky-concept">{{ row.concept }}</th>
+                        {% for val in row.monthly %}
+                            <td class="pnl-num-cell col-month" data-raw="{{ val|stringformat:'.2f' }}" title="{{ selected_currency }} {{ val|ar_currency:2 }}">{{ val|ar_currency:0 }}</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual" data-raw="{{ row.annual_total|stringformat:'.2f' }}" title="{{ selected_currency }} {{ row.annual_total|ar_currency:2 }}">{{ row.annual_total|ar_currency:0 }}</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">{{ row.vertical_pct|stringformat:".1f" }}%</td>
+                    </tr>
+                    {% empty %}
+                    <tr class="pnl-item-row pnl-empty-block-row" data-block="income">
+                        <th scope="row" class="col-sticky-concept pnl-empty-concept">Sin ingresos registrados</th>
+                        {% for _ in month_headers %}
+                            <td class="pnl-num-cell col-month">0</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual">0</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">0.0%</td>
+                    </tr>
+                    {% endfor %}
+                    <tr id="row-total-ingresos" class="pnl-subtotal-row" data-toggle-block="income" data-block="income" role="button" tabindex="0" aria-expanded="false" title="Tocar para desplegar u ocultar detalle de Ingresos Operativos">
+                        <th scope="row" class="col-sticky-concept">
+                            <span class="pnl-toggle-indicator" data-indicator-for="income">[+]</span>
+                            <span>TOTAL INGRESOS</span>
+                        </th>
+                        {% for val in pnl.total_income.monthly %}
+                            <td class="pnl-num-cell col-month" data-raw="{{ val|stringformat:'.2f' }}" title="{{ selected_currency }} {{ val|ar_currency:2 }}">{{ val|ar_currency:0 }}</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual" data-raw="{{ pnl.total_income.annual_total|stringformat:'.2f' }}" title="{{ selected_currency }} {{ pnl.total_income.annual_total|ar_currency:2 }}">{{ pnl.total_income.annual_total|ar_currency:0 }}</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">{{ pnl.total_income.vertical_pct|stringformat:".1f" }}%</td>
+                    </tr>
+
+                    <!-- =========================================================
+                         ESCALÓN 2: GASTOS OPERATIVOS (OPEX)
+                         ========================================================= -->
+                    <tr class="pnl-section-header-row" data-block="opex">
+                        <th scope="colgroup" class="col-sticky-concept">2. GASTOS OPERATIVOS (OPEX)</th>
+                        <td colspan="12" class="pnl-section-spacer col-month"></td>
+                        <td colspan="2" class="pnl-section-spacer"></td>
+                    </tr>
+                    {% for row in pnl.opex_rows %}
+                    <tr class="pnl-item-row pnl-concept-row" data-block="opex" data-concept="{{ row.normalized_concept }}">
+                        <th scope="row" class="col-sticky-concept">{{ row.concept }}</th>
+                        {% for val in row.monthly %}
+                            <td class="pnl-num-cell col-month" data-raw="{{ val|stringformat:'.2f' }}" title="{{ selected_currency }} {{ val|ar_currency:2 }}">{{ val|ar_currency:0 }}</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual" data-raw="{{ row.annual_total|stringformat:'.2f' }}" title="{{ selected_currency }} {{ row.annual_total|ar_currency:2 }}">{{ row.annual_total|ar_currency:0 }}</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">{{ row.vertical_pct|stringformat:".1f" }}%</td>
+                    </tr>
+                    {% empty %}
+                    <tr class="pnl-item-row pnl-empty-block-row" data-block="opex">
+                        <th scope="row" class="col-sticky-concept pnl-empty-concept">Sin gastos operativos registrados</th>
+                        {% for _ in month_headers %}
+                            <td class="pnl-num-cell col-month">0</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual">0</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">0.0%</td>
+                    </tr>
+                    {% endfor %}
+                    <tr id="row-total-opex" class="pnl-subtotal-row" data-toggle-block="opex" data-block="opex" role="button" tabindex="0" aria-expanded="false" title="Tocar para desplegar u ocultar detalle de Gastos Operativos">
+                        <th scope="row" class="col-sticky-concept">
+                            <span class="pnl-toggle-indicator" data-indicator-for="opex">[+]</span>
+                            <span>TOTAL GASTOS OPERATIVOS (OPEX)</span>
+                        </th>
+                        {% for val in pnl.total_opex.monthly %}
+                            <td class="pnl-num-cell col-month" data-raw="{{ val|stringformat:'.2f' }}" title="{{ selected_currency }} {{ val|ar_currency:2 }}">{{ val|ar_currency:0 }}</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual" data-raw="{{ pnl.total_opex.annual_total|stringformat:'.2f' }}" title="{{ selected_currency }} {{ pnl.total_opex.annual_total|ar_currency:2 }}">{{ pnl.total_opex.annual_total|ar_currency:0 }}</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">{{ pnl.total_opex.vertical_pct|stringformat:".1f" }}%</td>
+                    </tr>
+
+                    <!-- =========================================================
+                         ESCALÓN 3: SUBTOTAL 1 — RESULTADO OPERATIVO (EBITDA)
+                         ========================================================= -->
+                    <tr id="row-ebitda" class="pnl-major-row pnl-major-row--ebitda">
+                        <th scope="row" class="col-sticky-concept">RESULTADO OPERATIVO (EBITDA)</th>
+                        {% for val in pnl.ebitda.monthly %}
+                            <td class="pnl-num-cell col-month" data-raw="{{ val|stringformat:'.2f' }}" title="{{ selected_currency }} {{ val|ar_currency:2 }}">{{ val|ar_currency:0 }}</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual" data-raw="{{ pnl.ebitda.annual_total|stringformat:'.2f' }}" title="{{ selected_currency }} {{ pnl.ebitda.annual_total|ar_currency:2 }}">{{ pnl.ebitda.annual_total|ar_currency:0 }}</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">{{ pnl.ebitda.vertical_pct|stringformat:".1f" }}%</td>
+                    </tr>
+                    <tr id="row-ebitda-margin" class="pnl-margin-row">
+                        <th scope="row" class="col-sticky-concept">MARGEN OPERATIVO (EBITDA %)</th>
+                        {% for pct in pnl.ebitda_margin.monthly %}
+                            <td class="pnl-num-cell pnl-num-cell--pct col-month">{{ pct|stringformat:".1f" }}%</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual pnl-num-cell--pct">{{ pnl.ebitda_margin.annual_total|stringformat:".1f" }}%</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">{{ pnl.ebitda_margin.vertical_pct|stringformat:".1f" }}%</td>
+                    </tr>
+
+                    <!-- =========================================================
+                         ESCALÓN 4: CAPEX Y SERVICIO DE DEUDA (NO OPERATIVO)
+                         ========================================================= -->
+                    <tr class="pnl-section-header-row" data-block="non_operating">
+                        <th scope="colgroup" class="col-sticky-concept">4. CAPEX Y SERVICIO DE DEUDA (NO OPERATIVO)</th>
+                        <td colspan="12" class="pnl-section-spacer col-month"></td>
+                        <td colspan="2" class="pnl-section-spacer"></td>
+                    </tr>
+                    {% for row in pnl.non_operating_rows %}
+                    <tr class="pnl-item-row pnl-concept-row" data-block="non_operating" data-concept="{{ row.normalized_concept }}">
+                        <th scope="row" class="col-sticky-concept">{{ row.concept }}</th>
+                        {% for val in row.monthly %}
+                            <td class="pnl-num-cell col-month" data-raw="{{ val|stringformat:'.2f' }}" title="{{ selected_currency }} {{ val|ar_currency:2 }}">{{ val|ar_currency:0 }}</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual" data-raw="{{ row.annual_total|stringformat:'.2f' }}" title="{{ selected_currency }} {{ row.annual_total|ar_currency:2 }}">{{ row.annual_total|ar_currency:0 }}</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">{{ row.vertical_pct|stringformat:".1f" }}%</td>
+                    </tr>
+                    {% empty %}
+                    <tr class="pnl-item-row pnl-empty-block-row" data-block="non_operating">
+                        <th scope="row" class="col-sticky-concept pnl-empty-concept">Sin conceptos no operativos (Estructura / Deuda)</th>
+                        {% for _ in month_headers %}
+                            <td class="pnl-num-cell col-month">0</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual">0</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">0.0%</td>
+                    </tr>
+                    {% endfor %}
+                    <tr id="row-total-non-operating" class="pnl-subtotal-row" data-toggle-block="non_operating" data-block="non_operating" role="button" tabindex="0" aria-expanded="false" title="Tocar para desplegar u ocultar detalle No Operativo (CAPEX y Deuda)">
+                        <th scope="row" class="col-sticky-concept">
+                            <span class="pnl-toggle-indicator" data-indicator-for="non_operating">[+]</span>
+                            <span>TOTAL NO OPERATIVO (CAPEX + DEUDA)</span>
+                        </th>
+                        {% for val in pnl.total_non_operating.monthly %}
+                            <td class="pnl-num-cell col-month" data-raw="{{ val|stringformat:'.2f' }}" title="{{ selected_currency }} {{ val|ar_currency:2 }}">{{ val|ar_currency:0 }}</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual" data-raw="{{ pnl.total_non_operating.annual_total|stringformat:'.2f' }}" title="{{ selected_currency }} {{ pnl.total_non_operating.annual_total|ar_currency:2 }}">{{ pnl.total_non_operating.annual_total|ar_currency:0 }}</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">{{ pnl.total_non_operating.vertical_pct|stringformat:".1f" }}%</td>
+                    </tr>
+
+                    <!-- =========================================================
+                         ESCALÓN 5: RESULTADO NETO DE CAJA (FLUJO LIBRE)
+                         ========================================================= -->
+                    <tr id="row-net-result" class="pnl-major-row pnl-major-row--net">
+                        <th scope="row" class="col-sticky-concept">RESULTADO NETO DE CAJA (FLUJO LIBRE)</th>
+                        {% for val in pnl.net_result.monthly %}
+                            <td class="pnl-num-cell col-month" data-raw="{{ val|stringformat:'.2f' }}" title="{{ selected_currency }} {{ val|ar_currency:2 }}">{{ val|ar_currency:0 }}</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual" data-raw="{{ pnl.net_result.annual_total|stringformat:'.2f' }}" title="{{ selected_currency }} {{ pnl.net_result.annual_total|ar_currency:2 }}">{{ pnl.net_result.annual_total|ar_currency:0 }}</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">{{ pnl.net_result.vertical_pct|stringformat:".1f" }}%</td>
+                    </tr>
+                    <tr id="row-net-margin" class="pnl-margin-row">
+                        <th scope="row" class="col-sticky-concept">MARGEN NETO (%)</th>
+                        {% for pct in pnl.net_margin.monthly %}
+                            <td class="pnl-num-cell pnl-num-cell--pct col-month">{{ pct|stringformat:".1f" }}%</td>
+                        {% endfor %}
+                        <td class="pnl-num-cell pnl-num-cell--annual pnl-num-cell--pct">{{ pnl.net_margin.annual_total|stringformat:".1f" }}%</td>
+                        <td class="pnl-num-cell pnl-num-cell--pct">{{ pnl.net_margin.vertical_pct|stringformat:".1f" }}%</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<script>
+    (function () {
+        /* 1. Auto-submit de filtros GET */
+        var filterForm = document.getElementById("pnl-filter-form");
+        if (filterForm) {
+            var selects = filterForm.querySelectorAll("select");
+            for (var i = 0; i < selects.length; i++) {
+                selects[i].addEventListener("change", function () {
+                    filterForm.submit();
+                });
+            }
+        }
+
+        /* 2. Control de Granularidad (Acordeón por Bloque + Toggle Global) */
+        var pnlTable = document.getElementById("pnl-table");
+        var granularityBtn = document.getElementById("btn-toggle-granularity");
+        var toggleRows = document.querySelectorAll("tr[data-toggle-block]");
+        var blocks = ["income", "opex", "non_operating"];
+        var blockState = {
+            income: false,
+            opex: false,
+            non_operating: false
+        };
+
+        function setBlockExpanded(blockName, isExpanded) {
+            blockState[blockName] = Boolean(isExpanded);
+            var childRows = document.querySelectorAll(
+                'tr.pnl-item-row[data-block="' + blockName + '"], tr.pnl-section-header-row[data-block="' + blockName + '"]'
+            );
+            for (var j = 0; j < childRows.length; j++) {
+                if (isExpanded) {
+                    childRows[j].classList.add("is-expanded");
+                    childRows[j].classList.remove("is-collapsed");
+                } else {
+                    childRows[j].classList.remove("is-expanded");
+                    childRows[j].classList.add("is-collapsed");
+                }
+            }
+
+            var subtotalRow = document.querySelector('tr[data-toggle-block="' + blockName + '"]');
+            if (subtotalRow) {
+                subtotalRow.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+            }
+
+            var indicator = document.querySelector('[data-indicator-for="' + blockName + '"]');
+            if (indicator) {
+                indicator.textContent = isExpanded ? "[-]" : "[+]";
+            }
+        }
+
+        function syncGlobalGranularityButton() {
+            if (!granularityBtn) return;
+            var allExpanded = blocks.every(function (b) {
+                return blockState[b];
+            });
+            granularityBtn.setAttribute("aria-expanded", allExpanded ? "true" : "false");
+            granularityBtn.textContent = allExpanded
+                ? "Ver resumen consolidado"
+                : "Ver detalle granular";
+        }
+
+        function initGranularityByViewport() {
+            var isDesktop = window.matchMedia("(min-width: 769px)").matches;
+            for (var k = 0; k < blocks.length; k++) {
+                setBlockExpanded(blocks[k], isDesktop);
+            }
+            syncGlobalGranularityButton();
+        }
+
+        for (var r = 0; r < toggleRows.length; r++) {
+            (function (rowEl) {
+                var blockName = rowEl.getAttribute("data-toggle-block");
+                rowEl.addEventListener("click", function () {
+                    setBlockExpanded(blockName, !blockState[blockName]);
+                    syncGlobalGranularityButton();
+                });
+                rowEl.addEventListener("keydown", function (ev) {
+                    if (ev.key === "Enter" || ev.key === " ") {
+                        ev.preventDefault();
+                        setBlockExpanded(blockName, !blockState[blockName]);
+                        syncGlobalGranularityButton();
+                    }
+                });
+            })(toggleRows[r]);
+        }
+
+        if (granularityBtn) {
+            granularityBtn.addEventListener("click", function () {
+                var allExpanded = blocks.every(function (b) {
+                    return blockState[b];
+                });
+                var nextState = !allExpanded;
+                for (var bIdx = 0; bIdx < blocks.length; bIdx++) {
+                    setBlockExpanded(blocks[bIdx], nextState);
+                }
+                syncGlobalGranularityButton();
+            });
+        }
+
+        initGranularityByViewport();
+
+        /* 3. Selector en Mobile: "Vista: Consolidado Anual" vs "Vista: Mensual (Ene-Dic)" */
+        var btnAnnual = document.getElementById("btn-view-annual");
+        var btnMonthly = document.getElementById("btn-view-monthly");
+
+        function setHorizonView(mode) {
+            if (!pnlTable || !btnAnnual || !btnMonthly) return;
+            if (mode === "annual") {
+                pnlTable.classList.add("pnl-table--annual-only");
+                btnAnnual.classList.add("is-active");
+                btnAnnual.setAttribute("aria-pressed", "true");
+                btnMonthly.classList.remove("is-active");
+                btnMonthly.setAttribute("aria-pressed", "false");
+            } else {
+                pnlTable.classList.remove("pnl-table--annual-only");
+                btnMonthly.classList.add("is-active");
+                btnMonthly.setAttribute("aria-pressed", "true");
+                btnAnnual.classList.remove("is-active");
+                btnAnnual.setAttribute("aria-pressed", "false");
+            }
+        }
+
+        if (btnAnnual && btnMonthly) {
+            btnAnnual.addEventListener("click", function () {
+                setHorizonView("annual");
+            });
+            btnMonthly.addEventListener("click", function () {
+                setHorizonView("monthly");
+            });
+        }
+    })();
+</script>
 {% endblock %}

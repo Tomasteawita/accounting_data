@@ -5,7 +5,7 @@ con ingesta masiva en memoria mediante pandas.
 """
 
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import gc
 import io
 import json
@@ -28,6 +28,8 @@ from django.contrib.auth.views import (
 from django.core.cache import cache
 from django.core.paginator import Paginator
 from django.db import transaction as db_transaction
+from django.db.models import Sum
+from django.db.models.functions import ExtractMonth, ExtractYear
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse_lazy
@@ -53,6 +55,255 @@ CustomUser = get_user_model()
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
 ALLOWED_PAGE_SIZES = (25, 50, 100)
+
+NON_OPERATING_EXPENSE_CONCEPTS = {"deuda", "estructura"}
+
+MONTH_HEADERS = [
+    (1, "Ene"),
+    (2, "Feb"),
+    (3, "Mar"),
+    (4, "Abr"),
+    (5, "May"),
+    (6, "Jun"),
+    (7, "Jul"),
+    (8, "Ago"),
+    (9, "Sep"),
+    (10, "Oct"),
+    (11, "Nov"),
+    (12, "Dic"),
+]
+
+
+def _normalize_concept_name(raw_concept):
+    """
+    Normaliza el nombre de un concepto contable eliminando tildes,
+    convirtiendo a minúsculas y colapsando espacios múltiples.
+    """
+    text = str(raw_concept or "").strip().lower()
+    text = "".join(
+        ch
+        for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
+    return " ".join(text.split())
+
+
+def _quantize_money(value):
+    """Redondea montos monetarios con precisión Decimal(0.01)."""
+    return Decimal(value or "0.00").quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+
+
+def _calculate_percentage(numerator, denominator):
+    """
+    Calcula el porcentaje contable ((numerador / denominador) * 100) con Decimal.
+    Si los ingresos (denominador) son 0, devuelve Decimal('0.0') sin lanzar ZeroDivisionError.
+    """
+    num = Decimal(numerator or "0.00")
+    den = Decimal(denominator or "0.00")
+    if den == Decimal("0.00"):
+        return Decimal("0.0")
+    return ((num / den) * Decimal("100")).quantize(
+        Decimal("0.1"), rounding=ROUND_HALF_UP
+    )
+
+
+def _finalize_pnl_concept_rows(concept_map, total_income_annual):
+    """
+    Construye y ordena las filas de un bloque del P&L de mayor a menor monto anual acumulado.
+    """
+    rows = []
+    for item in concept_map.values():
+        annual_total = _quantize_money(
+            sum(item["monthly"], Decimal("0.00"))
+        )
+        vertical_pct = _calculate_percentage(annual_total, total_income_annual)
+        rows.append(
+            {
+                "concept": item["concept"],
+                "normalized_concept": item["normalized_concept"],
+                "monthly": item["monthly"],
+                "annual_total": annual_total,
+                "vertical_pct": vertical_pct,
+                "vertical_pct_display": f"{vertical_pct:.1f}%",
+            }
+        )
+    rows.sort(key=lambda r: (-r["annual_total"], r["concept"].lower()))
+    return rows
+
+
+def _build_pnl_matrix(monthly_aggregates):
+    """
+    Transforma los agregados mensuales de PostgreSQL en la estructura matricial
+    de Estado de Resultados (P&L) de 5 escalones utilizando exclusivamente Decimal.
+    """
+    income_map = {}
+    opex_map = {}
+    non_op_map = {}
+
+    for row in monthly_aggregates:
+        tx_type = row.get("transaction_type")
+        raw_concept = str(row.get("concept") or "Sin concepto").strip() or "Sin concepto"
+        norm_concept = _normalize_concept_name(raw_concept)
+        month_num = int(row.get("month") or 0)
+        if month_num < 1 or month_num > 12:
+            continue
+        month_idx = month_num - 1
+        amount = _quantize_money(row.get("total_amount") or Decimal("0.00"))
+
+        if tx_type == Transaction.TransactionType.INCOME:
+            target_map = income_map
+        else:
+            if norm_concept in NON_OPERATING_EXPENSE_CONCEPTS:
+                target_map = non_op_map
+            else:
+                target_map = opex_map
+
+        if norm_concept not in target_map:
+            target_map[norm_concept] = {
+                "concept": raw_concept,
+                "normalized_concept": norm_concept,
+                "monthly": [Decimal("0.00") for _ in range(12)],
+            }
+        target_map[norm_concept]["monthly"][month_idx] = _quantize_money(
+            target_map[norm_concept]["monthly"][month_idx] + amount
+        )
+
+    # 1. Ingresos Operativos
+    total_income_monthly = [
+        _quantize_money(
+            sum((item["monthly"][m] for item in income_map.values()), Decimal("0.00"))
+        )
+        for m in range(12)
+    ]
+    total_income_annual = _quantize_money(
+        sum(total_income_monthly, Decimal("0.00"))
+    )
+    income_rows = _finalize_pnl_concept_rows(income_map, total_income_annual)
+    total_income_pct = _calculate_percentage(total_income_annual, total_income_annual)
+    total_income_row = {
+        "label": "TOTAL INGRESOS",
+        "monthly": total_income_monthly,
+        "annual_total": total_income_annual,
+        "vertical_pct": total_income_pct,
+        "vertical_pct_display": f"{total_income_pct:.1f}%",
+    }
+
+    # 2. Gastos Operativos (OPEX)
+    opex_rows = _finalize_pnl_concept_rows(opex_map, total_income_annual)
+    total_opex_monthly = [
+        _quantize_money(
+            sum((r["monthly"][m] for r in opex_rows), Decimal("0.00"))
+        )
+        for m in range(12)
+    ]
+    total_opex_annual = _quantize_money(
+        sum(total_opex_monthly, Decimal("0.00"))
+    )
+    total_opex_pct = _calculate_percentage(total_opex_annual, total_income_annual)
+    total_opex_row = {
+        "label": "TOTAL GASTOS OPERATIVOS (OPEX)",
+        "monthly": total_opex_monthly,
+        "annual_total": total_opex_annual,
+        "vertical_pct": total_opex_pct,
+        "vertical_pct_display": f"{total_opex_pct:.1f}%",
+    }
+
+    # 3. Subtotal 1 — Resultado Operativo (EBITDA) y Margen Operativo (EBITDA %)
+    ebitda_monthly = [
+        _quantize_money(total_income_monthly[m] - total_opex_monthly[m])
+        for m in range(12)
+    ]
+    ebitda_annual = _quantize_money(total_income_annual - total_opex_annual)
+    ebitda_pct = _calculate_percentage(ebitda_annual, total_income_annual)
+    ebitda_row = {
+        "label": "SUBTOTAL 1 — RESULTADO OPERATIVO (EBITDA)",
+        "monthly": ebitda_monthly,
+        "annual_total": ebitda_annual,
+        "vertical_pct": ebitda_pct,
+        "vertical_pct_display": f"{ebitda_pct:.1f}%",
+    }
+
+    ebitda_margin_monthly = [
+        _calculate_percentage(ebitda_monthly[m], total_income_monthly[m])
+        for m in range(12)
+    ]
+    ebitda_margin_row = {
+        "label": "MARGEN OPERATIVO (EBITDA %)",
+        "monthly": ebitda_margin_monthly,
+        "monthly_display": [f"{pct:.1f}%" for pct in ebitda_margin_monthly],
+        "annual_total": ebitda_pct,
+        "annual_display": f"{ebitda_pct:.1f}%",
+        "vertical_pct": ebitda_pct,
+        "vertical_pct_display": f"{ebitda_pct:.1f}%",
+    }
+
+    # 4. CAPEX y Servicio de Deuda (No Operativo)
+    non_operating_rows = _finalize_pnl_concept_rows(non_op_map, total_income_annual)
+    total_non_op_monthly = [
+        _quantize_money(
+            sum((r["monthly"][m] for r in non_operating_rows), Decimal("0.00"))
+        )
+        for m in range(12)
+    ]
+    total_non_op_annual = _quantize_money(
+        sum(total_non_op_monthly, Decimal("0.00"))
+    )
+    total_non_op_pct = _calculate_percentage(total_non_op_annual, total_income_annual)
+    total_non_operating_row = {
+        "label": "TOTAL NO OPERATIVO (CAPEX + DEUDA)",
+        "monthly": total_non_op_monthly,
+        "annual_total": total_non_op_annual,
+        "vertical_pct": total_non_op_pct,
+        "vertical_pct_display": f"{total_non_op_pct:.1f}%",
+    }
+
+    # 5. Resultado Neto de Caja (Flujo Libre) y Margen Neto (%)
+    net_result_monthly = [
+        _quantize_money(ebitda_monthly[m] - total_non_op_monthly[m])
+        for m in range(12)
+    ]
+    net_result_annual = _quantize_money(ebitda_annual - total_non_op_annual)
+    net_result_pct = _calculate_percentage(net_result_annual, total_income_annual)
+    net_result_row = {
+        "label": "RESULTADO NETO DE CAJA (FLUJO LIBRE)",
+        "monthly": net_result_monthly,
+        "annual_total": net_result_annual,
+        "vertical_pct": net_result_pct,
+        "vertical_pct_display": f"{net_result_pct:.1f}%",
+    }
+
+    net_margin_monthly = [
+        _calculate_percentage(net_result_monthly[m], total_income_monthly[m])
+        for m in range(12)
+    ]
+    net_margin_row = {
+        "label": "MARGEN NETO (%)",
+        "monthly": net_margin_monthly,
+        "monthly_display": [f"{pct:.1f}%" for pct in net_margin_monthly],
+        "annual_total": net_result_pct,
+        "annual_display": f"{net_result_pct:.1f}%",
+        "vertical_pct": net_result_pct,
+        "vertical_pct_display": f"{net_result_pct:.1f}%",
+    }
+
+    has_transactions = bool(income_rows or opex_rows or non_operating_rows)
+
+    return {
+        "income_rows": income_rows,
+        "total_income": total_income_row,
+        "opex_rows": opex_rows,
+        "total_opex": total_opex_row,
+        "ebitda": ebitda_row,
+        "ebitda_margin": ebitda_margin_row,
+        "non_operating_rows": non_operating_rows,
+        "total_non_operating": total_non_operating_row,
+        "net_result": net_result_row,
+        "net_income": net_result_row,
+        "net_margin": net_margin_row,
+        "has_transactions": has_transactions,
+    }
 
 
 def _parse_pagination_params(source_dict, fallback_dict=None):
@@ -91,8 +342,112 @@ def home(request):
 @login_required
 @require_http_methods(["GET"])
 def dashboard_view(request):
-    """Interfaz principal del Dashboard (Inicio) para usuarios autenticados."""
-    return render(request, "app/dashboard.html")
+    """
+    Módulo de Estado de Resultados (P&L Mensual) en la vista de Inicio.
+    Realiza la agregación directamente en PostgreSQL con ExtractMonth y Sum('amount')
+    sin instanciar DataFrames de pandas para proteger la RAM de la instancia EC2 t4g.small.
+    """
+    user_tx_qs = Transaction.objects.filter(user=request.user)
+
+    raw_years = list(
+        user_tx_qs.annotate(year=ExtractYear("date"))
+        .values_list("year", flat=True)
+        .distinct()
+        .order_by("-year")
+    )
+    available_years = sorted({int(y) for y in raw_years if y is not None}, reverse=True)
+    current_year = datetime.now().year
+    if not available_years:
+        available_years = [current_year]
+
+    raw_verticals = list(
+        user_tx_qs.exclude(vertical="")
+        .values_list("vertical", flat=True)
+        .distinct()
+        .order_by("vertical")
+    )
+    available_verticals = [v for v in raw_verticals if v]
+
+    raw_year_param = (request.GET.get("year") or "").strip()
+    try:
+        selected_year = int(raw_year_param)
+        if selected_year < 1900 or selected_year > 2100:
+            raise ValueError
+    except ValueError:
+        selected_year = available_years[0]
+
+    if selected_year not in available_years:
+        available_years = sorted(set(available_years + [selected_year]), reverse=True)
+
+    raw_currency_param = (
+        request.GET.get("currency") or Transaction.Currency.ARS
+    ).strip().upper()
+    valid_currencies = {Transaction.Currency.ARS, Transaction.Currency.USD}
+    selected_currency = (
+        raw_currency_param
+        if raw_currency_param in valid_currencies
+        else Transaction.Currency.ARS
+    )
+
+    raw_vertical_param = (request.GET.get("vertical") or "").strip()
+    if raw_vertical_param.upper() in ("", "TODAS", "ALL"):
+        selected_vertical = ""
+    else:
+        selected_vertical = raw_vertical_param
+
+    pnl_qs = user_tx_qs.filter(
+        date__year=selected_year,
+        currency=selected_currency,
+    )
+    if selected_vertical:
+        pnl_qs = pnl_qs.filter(vertical=selected_vertical)
+
+    monthly_aggregates = (
+        pnl_qs.annotate(month=ExtractMonth("date"))
+        .values("transaction_type", "concept", "month")
+        .annotate(total_amount=Sum("amount"))
+        .order_by("transaction_type", "concept", "month")
+    )
+
+    pnl = _build_pnl_matrix(monthly_aggregates)
+
+    kpis = {
+        "total_income": pnl["total_income"]["annual_total"],
+        "total_opex": pnl["total_opex"]["annual_total"],
+        "opex_pct": pnl["total_opex"]["vertical_pct"],
+        "ebitda": pnl["ebitda"]["annual_total"],
+        "ebitda_margin": pnl["ebitda"]["vertical_pct"],
+        "total_non_operating": pnl["total_non_operating"]["annual_total"],
+        "net_result": pnl["net_result"]["annual_total"],
+        "net_margin": pnl["net_result"]["vertical_pct"],
+    }
+
+    context = {
+        "selected_year": selected_year,
+        "selected_currency": selected_currency,
+        "selected_vertical": selected_vertical,
+        "available_years": available_years,
+        "available_verticals": available_verticals,
+        "currencies": [
+            (Transaction.Currency.ARS, "ARS"),
+            (Transaction.Currency.USD, "USD"),
+        ],
+        "month_headers": [label for _, label in MONTH_HEADERS],
+        "months": [{"num": num, "label": label} for num, label in MONTH_HEADERS],
+        "pnl": pnl,
+        "kpis": kpis,
+        "income_rows": pnl["income_rows"],
+        "total_income_row": pnl["total_income"],
+        "opex_rows": pnl["opex_rows"],
+        "total_opex_row": pnl["total_opex"],
+        "ebitda_row": pnl["ebitda"],
+        "ebitda_margin_row": pnl["ebitda_margin"],
+        "non_operating_rows": pnl["non_operating_rows"],
+        "total_non_operating_row": pnl["total_non_operating"],
+        "net_result_row": pnl["net_result"],
+        "net_margin_row": pnl["net_margin"],
+    }
+    return render(request, "app/dashboard.html", context)
 
 
 def _serialize_cliente(c):
