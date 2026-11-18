@@ -1,0 +1,19 @@
+name: Validar origen hacia main
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check_branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar que el PR venga de development
+        if: github.head_ref != 'development'
+        run: |
+          echo "❌ Error: Solo se permiten merges hacia 'main' desde la rama 'development'. Tu rama actual es '${{ github.head_ref }}'."
+          exit 1
+      - name: Origen válido
+        if: github.head_ref == 'development'
+        run: echo "✅ El PR proviene de development."
