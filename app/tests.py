@@ -1558,7 +1558,9 @@ class VerticalsModuleAndIntegrityTests(TestCase):
         self.assertEqual(tx.amount, Decimal("90000.00"))
 
         # 3. Al exportar transacciones a Excel, se preserva el nombre de la vertical histórica
-        res_export = self.client.get(reverse("app:transactions_export"))
+        res_export = self.client.get(
+            f"{reverse('app:transactions_export')}?fecha_desde=2025-01-01&fecha_hasta=2025-12-31"
+        )
         self.assertEqual(res_export.status_code, 200)
         df_export = pd.read_excel(
             io.BytesIO(res_export.content),
@@ -1567,7 +1569,6 @@ class VerticalsModuleAndIntegrityTests(TestCase):
         )
         self.assertEqual(len(df_export), 1)
         self.assertEqual(df_export.iloc[0]["Vertical"], "Línea Legacy 2025")
-        self.assertEqual(df_export.iloc[0]["Estado_Vertical"], "Inactiva")
 
     def test_strict_user_isolation_for_verticals_and_transactions(self):
         v_other = Vertical.objects.create(

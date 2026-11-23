@@ -22,14 +22,6 @@
             <p class="tx-panel-help">
                 Estructura de columnas: <code>Fecha</code> (YYYY-MM-DD), <code>Vertical</code> (solo verticales activas registradas), <code>Tipo</code> (Gasto/Ingreso), <code>Concepto</code>, <code>Cliente</code> (nombre o ID), <code>Detalle</code>, <code>Monto</code> y <code>Moneda</code> (ARS/USD). Límite: 5 MB en RAM.
             </p>
-            <div class="tx-template-links">
-                <a href="{% url 'app:transactions_template' %}" class="btn-row-action">
-                    Descargar Plantilla Excel (.xlsx)
-                </a>
-                <a href="{% url 'app:transactions_export' %}" class="btn-row-action">
-                    Exportar Transacciones (.xlsx)
-                </a>
-            </div>
         </div>
         <form id="bulk-upload-form" class="tx-upload-form" method="post" action="{% url 'app:transactions' %}" enctype="multipart/form-data" novalidate>
             {% csrf_token %}

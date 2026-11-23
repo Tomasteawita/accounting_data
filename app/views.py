@@ -1356,141 +1356,128 @@ def _get_active_verticals_list(user):
     ]
 
 
-def _generate_excel_template_bytes(user):
+TRANSACTION_SPREADSHEET_COLUMNS = [
+    "Fecha",
+    "Vertical",
+    "Tipo",
+    "Concepto",
+    "Cliente",
+    "Detalle",
+    "Monto",
+    "Moneda",
+]
+
+XLSX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+
+def _build_excel_bytes(
+    rows_data,
+    sheet_name="Transacciones",
+    active_verticals=None,
+    extra_columns=None,
+):
     """
-    Genera en memoria un archivo Excel (.xlsx) de plantilla/referencia con dos hojas:
-    1. 'Transacciones': Columnas contables y fila de ejemplo usando la primera vertical activa del usuario.
-    2. 'Verticales_Activas': Catálogo actualizado de verticales activas disponibles del usuario.
+    Construye un archivo Excel (.xlsx) estrictamente en memoria (io.BytesIO + pandas/openpyxl)
+    con las 8 columnas operativas exactas (más una segunda hoja 'Verticales_Activas' con las
+    verticales activas del usuario) y libera inmediatamente el DataFrame y el buffer.
     """
-    active_verticals = list(
-        Vertical.objects.filter(user=user, is_active=True).order_by("title")
-    )
-    sample_vertical = (
-        active_verticals[0].title if active_verticals else ""
-    )
-    tx_df = pd.DataFrame(
-        [
-            {
-                "Fecha": datetime.now().strftime("%Y-%m-%d"),
-                "Vertical": sample_vertical,
-                "Tipo": "Ingreso",
-                "Concepto": "Honorarios Mensuales",
-                "Cliente": "Cliente Ejemplo",
-                "Detalle": "Abono mensual",
-                "Monto": "100000.00",
-                "Moneda": "ARS",
-            }
-        ],
-        columns=[
-            "Fecha",
-            "Vertical",
-            "Tipo",
-            "Concepto",
-            "Cliente",
-            "Detalle",
-            "Monto",
-            "Moneda",
-        ],
-    )
+    buffer = io.BytesIO()
+    cols = list(TRANSACTION_SPREADSHEET_COLUMNS)
+    if extra_columns:
+        for col in extra_columns:
+            if col not in cols:
+                cols.append(col)
+    df = pd.DataFrame(rows_data, columns=cols)
+    vert_rows = [
+        {
+            "ID": v.id,
+            "Vertical": v.title,
+            "Descripcion": v.description or "",
+        }
+        for v in (active_verticals or [])
+    ]
     vert_df = pd.DataFrame(
-        [
-            {
-                "ID": v.id,
-                "Vertical": v.title,
-                "Descripcion": v.description or "",
-            }
-            for v in active_verticals
-        ],
-        columns=["ID", "Vertical", "Descripcion"],
+        vert_rows, columns=["ID", "Vertical", "Descripcion"]
     )
+    try:
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+            vert_df.to_excel(
+                writer, index=False, sheet_name="Verticales_Activas"
+            )
+        return buffer.getvalue()
+    finally:
+        del df
+        del vert_df
+        buffer.close()
+        del buffer
+        gc.collect()
 
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        tx_df.to_excel(writer, sheet_name="Transacciones", index=False)
-        vert_df.to_excel(writer, sheet_name="Verticales_Activas", index=False)
-    return output.getvalue()
 
-
-def _generate_excel_export_bytes(user):
+def _export_error_response(request, message, status=400):
     """
-    Exporta en memoria todas las transacciones del usuario a un archivo Excel (.xlsx),
-    preservando las verticales históricas (incluso si fueron dadas de baja posteriormente)
-    y adjuntando la hoja de verticales activas.
+    Devuelve una respuesta de error de validación en JSON cuando la petición proviene
+    de Fetch API / AJAX, o redirige a la vista de Transacciones con un mensaje en caso contrario.
     """
-    tx_qs = (
-        Transaction.objects.filter(user=user)
-        .select_related("client", "vertical")
-        .order_by("-date", "-id")
+    is_ajax = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in request.headers.get("Accept", "")
     )
-    rows = []
-    for tx in tx_qs:
-        v_title = tx.vertical.title if tx.vertical_id and tx.vertical else ""
-        rows.append(
-            {
-                "Fecha": (
-                    tx.date.strftime("%Y-%m-%d")
-                    if hasattr(tx.date, "strftime")
-                    else str(tx.date)
-                ),
-                "Vertical": v_title,
-                "Estado_Vertical": (
-                    "Activa"
-                    if (not tx.vertical_id or tx.vertical.is_active)
-                    else "Inactiva"
-                ),
-                "Tipo": tx.get_transaction_type_display(),
-                "Concepto": tx.concept,
-                "Cliente": tx.client.name if tx.client_id and tx.client else "",
-                "Detalle": tx.detail or "",
-                "Monto": f"{Decimal(tx.amount):.2f}",
-                "Moneda": tx.currency,
-            }
-        )
-    tx_df = pd.DataFrame(
-        rows,
-        columns=[
-            "Fecha",
-            "Vertical",
-            "Estado_Vertical",
-            "Tipo",
-            "Concepto",
-            "Cliente",
-            "Detalle",
-            "Monto",
-            "Moneda",
-        ],
-    )
-    active_verticals = list(
-        Vertical.objects.filter(user=user, is_active=True).order_by("title")
-    )
-    vert_df = pd.DataFrame(
-        [
-            {
-                "ID": v.id,
-                "Vertical": v.title,
-                "Descripcion": v.description or "",
-            }
-            for v in active_verticals
-        ],
-        columns=["ID", "Vertical", "Descripcion"],
-    )
-
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        tx_df.to_excel(writer, sheet_name="Transacciones", index=False)
-        vert_df.to_excel(writer, sheet_name="Verticales_Activas", index=False)
-    return output.getvalue()
+    if is_ajax:
+        return JsonResponse({"status": "error", "message": message}, status=status)
+    messages.error(request, message)
+    return redirect("app:transactions")
 
 
 @login_required
 @require_http_methods(["GET"])
 def transactions_template_view(request):
-    """Descarga la plantilla Excel actualizada con las verticales activas del usuario."""
-    excel_bytes = _generate_excel_template_bytes(request.user)
-    response = HttpResponse(
-        excel_bytes,
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    """
+    Genera y descarga en memoria una plantilla Excel (.xlsx) con las 8 cabeceras
+    esperadas por el importador, filas guía válidas basadas en las verticales activas
+    del usuario y la hoja 'Verticales_Activas' de referencia.
+    """
+    active_verticals = list(
+        Vertical.objects.filter(user=request.user, is_active=True).order_by(
+            "title"
+        )
     )
+    v1_title = active_verticals[0].title if len(active_verticals) >= 1 else ""
+    v2_title = (
+        active_verticals[1].title
+        if len(active_verticals) >= 2
+        else v1_title
+    )
+    sample_rows = [
+        {
+            "Fecha": "2026-11-01",
+            "Vertical": v1_title,
+            "Tipo": "Ingreso",
+            "Concepto": "Honorarios Mensuales",
+            "Cliente": "Cliente Ejemplo S.A.",
+            "Detalle": "Abono mensual (fila guía de ejemplo)",
+            "Monto": "150000.00",
+            "Moneda": "ARS",
+        },
+        {
+            "Fecha": "2026-11-02",
+            "Vertical": v2_title,
+            "Tipo": "Gasto",
+            "Concepto": "Licencias Software",
+            "Cliente": "",
+            "Detalle": "Infraestructura cloud (fila guía de ejemplo)",
+            "Monto": "25.50",
+            "Moneda": "USD",
+        },
+    ]
+    excel_bytes = _build_excel_bytes(
+        sample_rows,
+        sheet_name="Plantilla",
+        active_verticals=active_verticals,
+    )
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
     response["Content-Disposition"] = (
         'attachment; filename="plantilla_transacciones.xlsx"'
     )
@@ -1500,15 +1487,114 @@ def transactions_template_view(request):
 @login_required
 @require_http_methods(["GET"])
 def transactions_export_view(request):
-    """Exporta las transacciones del usuario a Excel preservando verticales históricas."""
-    excel_bytes = _generate_excel_export_bytes(request.user)
-    response = HttpResponse(
-        excel_bytes,
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    """
+    Exporta las transacciones del usuario autenticado (filtradas por rango de fechas
+    `fecha_desde` y `fecha_hasta` cuando se proporcionan, o completas cuando no se envían
+    parámetros en descarga directa) en un archivo `.xlsx` en memoria 100% compatible con
+    el flujo de importación y preservando verticales históricas.
+    """
+    raw_start = (
+        request.GET.get("fecha_desde") or request.GET.get("start_date") or ""
+    ).strip()
+    raw_end = (
+        request.GET.get("fecha_hasta") or request.GET.get("end_date") or ""
+    ).strip()
+
+    is_ajax = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in request.headers.get("Accept", "")
     )
-    response["Content-Disposition"] = (
-        'attachment; filename="transacciones_exportadas.xlsx"'
+
+    start_date = None
+    end_date = None
+    if raw_start or raw_end or is_ajax:
+        if not raw_start or not raw_end:
+            return _export_error_response(
+                request,
+                "Error de validación: Debe especificar las fechas 'Desde' y 'Hasta' para exportar.",
+                status=400,
+            )
+
+        try:
+            start_date = _parse_date_value(raw_start)
+            end_date = _parse_date_value(raw_end)
+        except ValueError:
+            return _export_error_response(
+                request,
+                "Error de validación: Formato de fecha inválido. Utilice el formato YYYY-MM-DD.",
+                status=400,
+            )
+
+        if start_date > end_date:
+            return _export_error_response(
+                request,
+                "Error de validación: La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.",
+                status=400,
+            )
+
+    qs = Transaction.objects.filter(user=request.user).select_related(
+        "client", "vertical"
     )
+    if start_date and end_date:
+        qs = qs.filter(date__gte=start_date, date__lte=end_date).order_by(
+            "date", "id"
+        )
+    else:
+        qs = qs.order_by("date", "id")
+
+    rows_data = [
+        {
+            "Fecha": (
+                tx.date.strftime("%Y-%m-%d")
+                if hasattr(tx.date, "strftime")
+                else str(tx.date)
+            ),
+            "Vertical": (
+                tx.vertical.title if tx.vertical_id and tx.vertical else ""
+            ),
+            "Tipo": (
+                "Ingreso"
+                if tx.transaction_type == Transaction.TransactionType.INCOME
+                else "Gasto"
+            ),
+            "Concepto": tx.concept,
+            "Cliente": tx.client.name if tx.client_id and tx.client else "",
+            "Detalle": tx.detail or "",
+            "Monto": f"{Decimal(tx.amount):.2f}",
+            "Moneda": tx.currency or Transaction.Currency.ARS,
+        }
+        for tx in qs
+    ]
+
+    if not rows_data:
+        if start_date and end_date:
+            return _export_error_response(
+                request,
+                f"No se encontraron transacciones registradas entre {start_date.strftime('%Y-%m-%d')} y {end_date.strftime('%Y-%m-%d')}.",
+                status=404,
+            )
+        return _export_error_response(
+            request,
+            "No se encontraron transacciones registradas para exportar.",
+            status=404,
+        )
+
+    active_verticals = list(
+        Vertical.objects.filter(user=request.user, is_active=True).order_by(
+            "title"
+        )
+    )
+    excel_bytes = _build_excel_bytes(
+        rows_data,
+        sheet_name="Transacciones",
+        active_verticals=active_verticals,
+    )
+    if start_date and end_date:
+        filename = f"transacciones_{start_date.strftime('%Y-%m-%d')}_a_{end_date.strftime('%Y-%m-%d')}.xlsx"
+    else:
+        filename = "transacciones_exportadas.xlsx"
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
 
 
@@ -1760,173 +1846,6 @@ def transactions_view(request):
         },
         status=400,
     )
-
-
-TRANSACTION_SPREADSHEET_COLUMNS = [
-    "Fecha",
-    "Vertical",
-    "Tipo",
-    "Concepto",
-    "Cliente",
-    "Detalle",
-    "Monto",
-    "Moneda",
-]
-
-XLSX_CONTENT_TYPE = (
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-
-
-def _build_excel_bytes(rows_data, sheet_name="Transacciones"):
-    """
-    Construye un archivo Excel (.xlsx) estrictamente en memoria (io.BytesIO + pandas/openpyxl)
-    con las 8 columnas operativas exactas y libera inmediatamente el DataFrame y el buffer.
-    """
-    buffer = io.BytesIO()
-    df = pd.DataFrame(rows_data, columns=TRANSACTION_SPREADSHEET_COLUMNS)
-    try:
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name=sheet_name)
-        return buffer.getvalue()
-    finally:
-        del df
-        buffer.close()
-        del buffer
-        gc.collect()
-
-
-def _export_error_response(request, message, status=400):
-    """
-    Devuelve una respuesta de error de validación en JSON cuando la petición proviene
-    de Fetch API / AJAX, o redirige a la vista de Transacciones con un mensaje en caso contrario.
-    """
-    is_ajax = (
-        request.headers.get("X-Requested-With") == "XMLHttpRequest"
-        or "application/json" in request.headers.get("Accept", "")
-    )
-    if is_ajax:
-        return JsonResponse({"status": "error", "message": message}, status=status)
-    messages.error(request, message)
-    return redirect("app:transactions")
-
-
-@login_required
-@require_http_methods(["GET"])
-def transactions_template_view(request):
-    """
-    Genera y descarga en memoria una plantilla Excel (.xlsx) con las 8 cabeceras
-    esperadas por el importador y filas guía válidas listas para completar o reimportar.
-    """
-    sample_rows = [
-        {
-            "Fecha": "2026-11-01",
-            "Vertical": "Consultoría",
-            "Tipo": "Ingreso",
-            "Concepto": "Honorarios Mensuales",
-            "Cliente": "Cliente Ejemplo S.A.",
-            "Detalle": "Abono mensual (fila guía de ejemplo)",
-            "Monto": "150000.00",
-            "Moneda": "ARS",
-        },
-        {
-            "Fecha": "2026-11-02",
-            "Vertical": "Operaciones",
-            "Tipo": "Gasto",
-            "Concepto": "Licencias Software",
-            "Cliente": "",
-            "Detalle": "Infraestructura cloud (fila guía de ejemplo)",
-            "Monto": "25.50",
-            "Moneda": "USD",
-        },
-    ]
-    excel_bytes = _build_excel_bytes(sample_rows, sheet_name="Plantilla")
-    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
-    response["Content-Disposition"] = (
-        'attachment; filename="plantilla_transacciones.xlsx"'
-    )
-    return response
-
-
-@login_required
-@require_http_methods(["GET"])
-def transactions_export_view(request):
-    """
-    Exporta las transacciones del usuario autenticado filtradas por rango de fechas
-    (`fecha_desde` y `fecha_hasta`, formato YYYY-MM-DD) en un archivo `.xlsx` en memoria
-    100% compatible con el flujo de importación.
-    """
-    raw_start = (
-        request.GET.get("fecha_desde") or request.GET.get("start_date") or ""
-    ).strip()
-    raw_end = (
-        request.GET.get("fecha_hasta") or request.GET.get("end_date") or ""
-    ).strip()
-
-    if not raw_start or not raw_end:
-        return _export_error_response(
-            request,
-            "Error de validación: Debe especificar las fechas 'Desde' y 'Hasta' para exportar.",
-            status=400,
-        )
-
-    try:
-        start_date = _parse_date_value(raw_start)
-        end_date = _parse_date_value(raw_end)
-    except ValueError:
-        return _export_error_response(
-            request,
-            "Error de validación: Formato de fecha inválido. Utilice el formato YYYY-MM-DD.",
-            status=400,
-        )
-
-    if start_date > end_date:
-        return _export_error_response(
-            request,
-            "Error de validación: La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.",
-            status=400,
-        )
-
-    qs = (
-        Transaction.objects.filter(
-            user=request.user,
-            date__gte=start_date,
-            date__lte=end_date,
-        )
-        .select_related("client")
-        .order_by("date", "id")
-    )
-
-    rows_data = [
-        {
-            "Fecha": tx.date.strftime("%Y-%m-%d"),
-            "Vertical": tx.vertical or "",
-            "Tipo": (
-                "Ingreso"
-                if tx.transaction_type == Transaction.TransactionType.INCOME
-                else "Gasto"
-            ),
-            "Concepto": tx.concept,
-            "Cliente": tx.client.name if tx.client_id and tx.client else "",
-            "Detalle": tx.detail or "",
-            "Monto": f"{Decimal(tx.amount):.2f}",
-            "Moneda": tx.currency or Transaction.Currency.ARS,
-        }
-        for tx in qs
-    ]
-
-    if not rows_data:
-        return _export_error_response(
-            request,
-            f"No se encontraron transacciones registradas entre {start_date.strftime('%Y-%m-%d')} y {end_date.strftime('%Y-%m-%d')}.",
-            status=404,
-        )
-
-    excel_bytes = _build_excel_bytes(rows_data, sheet_name="Transacciones")
-    filename = f"transacciones_{start_date.strftime('%Y-%m-%d')}_a_{end_date.strftime('%Y-%m-%d')}.xlsx"
-    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
-    response["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return response
 
 
 @login_required
