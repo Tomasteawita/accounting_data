@@ -15,8 +15,8 @@
     <!-- Notificaciones Dinámicas (Fetch API) -->
     <div id="tx-status-banner" class="alert-stoic tx-status-hidden" role="status" aria-live="polite"></div>
 
-    <!-- Panel de Ingesta Masiva en Memoria (CSV / Excel) -->
-    <section class="tx-upload-panel" aria-label="Ingesta masiva de archivos">
+    <!-- Panel de Ingesta Masiva en Memoria (CSV / Excel) y Exportación -->
+    <section class="tx-upload-panel" aria-label="Ingesta masiva y exportación de archivos">
         <div class="tx-upload-info">
             <h2 class="tx-panel-heading">Ingesta Masiva en Memoria (CSV / Excel)</h2>
             <p class="tx-panel-help">
@@ -31,6 +31,40 @@
                 <button type="submit" id="btn-upload-submit" class="btn-secondary tx-upload-btn">
                     Importar Archivo
                 </button>
+                <a href="{% url 'app:transactions_template' %}" id="btn-download-template" class="btn-outline tx-template-btn">
+                    Descargar Plantilla
+                </a>
+            </div>
+        </form>
+
+        <!-- Subpanel de Exportación por Rango de Fechas -->
+        <form id="export-transactions-form" class="tx-export-form" method="get" action="{% url 'app:transactions_export' %}" novalidate>
+            <div class="tx-export-controls">
+                <div class="tx-export-field">
+                    <label for="export-fecha-desde" class="tx-export-label">Fecha desde</label>
+                    <input
+                        type="date"
+                        id="export-fecha-desde"
+                        name="fecha_desde"
+                        class="sheet-input tx-export-date-input"
+                        required
+                        aria-label="Fecha desde">
+                </div>
+                <div class="tx-export-field">
+                    <label for="export-fecha-hasta" class="tx-export-label">Fecha hasta</label>
+                    <input
+                        type="date"
+                        id="export-fecha-hasta"
+                        name="fecha_hasta"
+                        class="sheet-input tx-export-date-input"
+                        required
+                        aria-label="Fecha hasta">
+                </div>
+                <div class="tx-export-actions">
+                    <button type="submit" id="btn-export-data" class="btn-secondary tx-export-btn">
+                        Exportar Datos
+                    </button>
+                </div>
             </div>
         </form>
     </section>
@@ -254,6 +288,10 @@
     var statusBanner = document.getElementById("tx-status-banner");
     var uploadForm = document.getElementById("bulk-upload-form");
     var uploadBtn = document.getElementById("btn-upload-submit");
+    var exportForm = document.getElementById("export-transactions-form");
+    var exportBtn = document.getElementById("btn-export-data");
+    var exportStartInput = document.getElementById("export-fecha-desde");
+    var exportEndInput = document.getElementById("export-fecha-hasta");
     var clientsDatalist = document.getElementById("clients-datalist");
 
     // Estado y controles de paginación
@@ -772,6 +810,77 @@
             .catch(function () {
                 if (uploadBtn) uploadBtn.disabled = false;
                 showBanner("Error de red durante la carga del archivo.", true);
+            });
+        });
+    }
+
+    // 4.b Formulario de exportación por rango de fechas (Excel en memoria vía Fetch API)
+    if (exportForm) {
+        exportForm.addEventListener("submit", function (event) {
+            event.preventDefault();
+            var startDate = exportStartInput ? exportStartInput.value.trim() : "";
+            var endDate = exportEndInput ? exportEndInput.value.trim() : "";
+
+            if (!startDate || !endDate) {
+                showBanner("Error de validación: Debe seleccionar las fechas 'Desde' y 'Hasta' para exportar.", true);
+                return;
+            }
+            if (startDate > endDate) {
+                showBanner("Error de validación: La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.", true);
+                return;
+            }
+
+            var exportEndpoint = exportForm.getAttribute("action") || "/transacciones/exportar/";
+            var exportUrl =
+                exportEndpoint +
+                "?fecha_desde=" +
+                encodeURIComponent(startDate) +
+                "&fecha_hasta=" +
+                encodeURIComponent(endDate);
+
+            if (exportBtn) exportBtn.disabled = true;
+
+            fetch(exportUrl, {
+                method: "GET",
+                headers: {
+                    "X-Requested-With": "XMLHttpRequest"
+                }
+            })
+            .then(function (res) {
+                var contentType = res.headers.get("Content-Type") || "";
+                if (!res.ok || contentType.indexOf("application/json") !== -1) {
+                    return res.json().then(function (errData) {
+                        throw new Error(errData.message || "Error al exportar las transacciones.");
+                    });
+                }
+                var disposition = res.headers.get("Content-Disposition") || "";
+                var filename = "transacciones_" + startDate + "_a_" + endDate + ".xlsx";
+                var match = disposition.match(/filename="?([^";]+)"?/i);
+                if (match && match[1]) {
+                    filename = match[1];
+                }
+                return res.blob().then(function (blob) {
+                    return { blob: blob, filename: filename };
+                });
+            })
+            .then(function (fileResult) {
+                if (exportBtn) exportBtn.disabled = false;
+                var downloadUrl = window.URL.createObjectURL(fileResult.blob);
+                var link = document.createElement("a");
+                link.href = downloadUrl;
+                link.download = fileResult.filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                window.URL.revokeObjectURL(downloadUrl);
+                showBanner(
+                    "Exportación completada: archivo descargado para el período " + startDate + " a " + endDate + ".",
+                    false
+                );
+            })
+            .catch(function (err) {
+                if (exportBtn) exportBtn.disabled = false;
+                showBanner(err.message || "Error de red al exportar las transacciones.", true);
             });
         });
     }

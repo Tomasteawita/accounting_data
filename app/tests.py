@@ -4,8 +4,10 @@ Cubre la Landing Page, el modelo CustomUser y los flujos completos de autenticac
 """
 
 from decimal import Decimal
+import io
 import json
 
+import pandas as pd
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
@@ -659,6 +661,221 @@ class TransactionModuleTests(TestCase):
         self.assertEqual(len(data_capped["transactions"]), 100)
         self.assertEqual(data_capped["pagination"]["per_page"], 100)
         self.assertEqual(data_capped["pagination"]["total_pages"], 2)
+
+    def test_download_template_xlsx_and_reimport_roundtrip(self):
+        """
+        Verifica que 'Descargar Plantilla' devuelve un archivo .xlsx válido con las 8 cabeceras
+        esperadas y que sus filas guía pueden reimportarse directamente mediante bulk_upload.
+        """
+        self.client.force_login(self.user)
+        template_url = reverse("app:transactions_template")
+
+        response = self.client.get(template_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertIn(
+            'attachment; filename="plantilla_transacciones.xlsx"',
+            response["Content-Disposition"],
+        )
+
+        # Inspeccionar estructura de columnas en memoria con pandas
+        df = pd.read_excel(io.BytesIO(response.content), dtype=str, keep_default_na=False)
+        expected_columns = [
+            "Fecha",
+            "Vertical",
+            "Tipo",
+            "Concepto",
+            "Cliente",
+            "Detalle",
+            "Monto",
+            "Moneda",
+        ]
+        self.assertEqual(list(df.columns), expected_columns)
+        self.assertEqual(len(df), 2)
+
+        # Round-trip: subir la plantilla descargada directamente a bulk_upload
+        uploaded_template = SimpleUploadedFile(
+            "plantilla_transacciones.xlsx",
+            response.content,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        res_import = self.client.post(
+            self.url,
+            {"action": "bulk_upload", "file": uploaded_template},
+        )
+        self.assertEqual(res_import.status_code, 200)
+        payload = res_import.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["imported_count"], 2)
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 2)
+
+    def test_export_transactions_by_date_range_user_isolation_and_roundtrip(self):
+        """
+        Verifica la exportación de transacciones en un rango [fecha_desde, fecha_hasta],
+        el aislamiento respecto a otros usuarios y la compatibilidad round-trip con Importar Archivo.
+        """
+        self.client.force_login(self.user)
+        export_url = reverse("app:transactions_export")
+
+        # Crear transacciones dentro y fuera del rango para self.user, y una para other_user
+        Transaction.objects.bulk_create(
+            [
+                Transaction(
+                    user=self.user,
+                    date="2026-10-31",
+                    vertical="Fuera Rango",
+                    transaction_type=Transaction.TransactionType.INCOME,
+                    concept="Octubre",
+                    amount=Decimal("500.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                Transaction(
+                    user=self.user,
+                    date="2026-11-05",
+                    vertical="Consultoría",
+                    transaction_type=Transaction.TransactionType.INCOME,
+                    concept="Abono Noviembre",
+                    client=self.client_obj,
+                    detail="Factura A-001",
+                    amount=Decimal("185000.50"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                Transaction(
+                    user=self.user,
+                    date="2026-11-15",
+                    vertical="Infraestructura",
+                    transaction_type=Transaction.TransactionType.EXPENSE,
+                    concept="Servidor Cloud",
+                    client=None,
+                    detail="Instancia EC2",
+                    amount=Decimal("42.75"),
+                    currency=Transaction.Currency.USD,
+                ),
+                Transaction(
+                    user=self.user,
+                    date="2026-12-01",
+                    vertical="Fuera Rango",
+                    transaction_type=Transaction.TransactionType.EXPENSE,
+                    concept="Diciembre",
+                    amount=Decimal("900.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+                Transaction(
+                    user=self.other_user,
+                    date="2026-11-10",
+                    vertical="Ajena",
+                    transaction_type=Transaction.TransactionType.INCOME,
+                    concept="No Debe Exportarse",
+                    amount=Decimal("999999.00"),
+                    currency=Transaction.Currency.ARS,
+                ),
+            ]
+        )
+
+        response = self.client.get(
+            f"{export_url}?fecha_desde=2026-11-01&fecha_hasta=2026-11-30"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertIn(
+            'attachment; filename="transacciones_2026-11-01_a_2026-11-30.xlsx"',
+            response["Content-Disposition"],
+        )
+
+        df = pd.read_excel(io.BytesIO(response.content), dtype=str, keep_default_na=False)
+        self.assertEqual(
+            list(df.columns),
+            ["Fecha", "Vertical", "Tipo", "Concepto", "Cliente", "Detalle", "Monto", "Moneda"],
+        )
+        self.assertEqual(len(df), 2)
+        self.assertEqual(df.iloc[0]["Fecha"], "2026-11-05")
+        self.assertEqual(df.iloc[0]["Tipo"], "Ingreso")
+        self.assertEqual(df.iloc[0]["Concepto"], "Abono Noviembre")
+        self.assertEqual(df.iloc[0]["Cliente"], "Corporación Austral")
+        self.assertEqual(df.iloc[0]["Monto"], "185000.50")
+        self.assertEqual(df.iloc[0]["Moneda"], "ARS")
+
+        self.assertEqual(df.iloc[1]["Fecha"], "2026-11-15")
+        self.assertEqual(df.iloc[1]["Tipo"], "Gasto")
+        self.assertEqual(df.iloc[1]["Concepto"], "Servidor Cloud")
+        self.assertEqual(df.iloc[1]["Cliente"], "")
+        self.assertEqual(df.iloc[1]["Monto"], "42.75")
+        self.assertEqual(df.iloc[1]["Moneda"], "USD")
+
+        # Round-trip: limpiar transacciones del usuario y reimportar el Excel exportado
+        Transaction.objects.filter(user=self.user).delete()
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+        exported_file = SimpleUploadedFile(
+            "transacciones_2026-11-01_a_2026-11-30.xlsx",
+            response.content,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        res_reimport = self.client.post(
+            self.url,
+            {"action": "bulk_upload", "file": exported_file},
+        )
+        self.assertEqual(res_reimport.status_code, 200)
+        self.assertEqual(res_reimport.json()["imported_count"], 2)
+
+        reimported = list(
+            Transaction.objects.filter(user=self.user).order_by("date", "id")
+        )
+        self.assertEqual(len(reimported), 2)
+        self.assertEqual(reimported[0].concept, "Abono Noviembre")
+        self.assertEqual(reimported[0].client_id, self.client_obj.id)
+        self.assertEqual(reimported[0].amount, Decimal("185000.50"))
+        self.assertEqual(reimported[1].concept, "Servidor Cloud")
+        self.assertEqual(reimported[1].transaction_type, Transaction.TransactionType.EXPENSE)
+        self.assertEqual(reimported[1].amount, Decimal("42.75"))
+        self.assertEqual(reimported[1].currency, Transaction.Currency.USD)
+
+    def test_export_transactions_validation_and_empty_range_edge_cases(self):
+        """
+        Verifica los casos borde de exportación:
+        - Fechas faltantes o con formato inválido (400).
+        - Rango invertido fecha_desde > fecha_hasta (400).
+        - Rango válido sin transacciones registradas (404).
+        """
+        self.client.force_login(self.user)
+        export_url = reverse("app:transactions_export")
+
+        # 1. Fechas faltantes
+        res_missing = self.client.get(
+            export_url, HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        self.assertEqual(res_missing.status_code, 400)
+        self.assertEqual(res_missing.json()["status"], "error")
+
+        # 2. Formato de fecha inválido
+        res_invalid = self.client.get(
+            f"{export_url}?fecha_desde=fecha-invalida&fecha_hasta=2026-11-30",
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(res_invalid.status_code, 400)
+        self.assertIn("Formato de fecha inválido", res_invalid.json()["message"])
+
+        # 3. Rango invertido (fecha_desde > fecha_hasta)
+        res_inverted = self.client.get(
+            f"{export_url}?fecha_desde=2026-11-30&fecha_hasta=2026-11-01",
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(res_inverted.status_code, 400)
+        self.assertIn("no puede ser posterior", res_inverted.json()["message"])
+
+        # 4. Sin transacciones en el rango
+        res_empty = self.client.get(
+            f"{export_url}?fecha_desde=2025-01-01&fecha_hasta=2025-01-31",
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(res_empty.status_code, 404)
+        self.assertIn("No se encontraron transacciones", res_empty.json()["message"])
 
 
 class ClienteModuleTests(TestCase):

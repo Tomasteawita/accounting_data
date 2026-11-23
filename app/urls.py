@@ -16,6 +16,16 @@ urlpatterns = [
     path("clientes/<int:pk>/editar/", views.client_update_view, name="client_update"),
     path("clientes/<int:pk>/eliminar/", views.client_delete_view, name="client_delete"),
     path("transacciones/", views.transactions_view, name="transactions"),
+    path(
+        "transacciones/exportar/",
+        views.transactions_export_view,
+        name="transactions_export",
+    ),
+    path(
+        "transacciones/plantilla/",
+        views.transactions_template_view,
+        name="transactions_template",
+    ),
     path("metricas/", views.metrics_view, name="metrics"),
     # Autenticación y Registro
     path("auth/login/", views.CustomLoginView.as_view(), name="login"),
