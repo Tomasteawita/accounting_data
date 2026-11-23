@@ -813,6 +813,44 @@ body {
     background-color: var(--bg-primary);
 }
 
+/* Subpanel de Exportación por Rango de Fechas */
+.tx-export-form {
+    border-top: 1px solid var(--border-tech);
+    padding-top: 1rem;
+    margin-top: 0.25rem;
+}
+
+.tx-export-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.tx-export-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.tx-export-label {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-primary);
+}
+
+.tx-export-date-input {
+    min-height: 44px;
+    background-color: var(--bg-primary);
+}
+
+.tx-export-actions {
+    display: flex;
+    flex-direction: column;
+}
+
 /* Barra de Herramientas de la Hoja de Cálculo */
 .sheet-toolbar {
     display: flex;
@@ -1803,9 +1841,22 @@ tr.pnl-section-header-row.is-collapsed {
         flex: 1;
     }
 
-    .tx-upload-btn {
+    .tx-upload-btn,
+    .tx-template-btn,
+    .tx-export-btn {
         width: auto;
         min-width: 190px;
+    }
+
+    .tx-export-controls {
+        flex-direction: row;
+        align-items: flex-end;
+        flex-wrap: wrap;
+    }
+
+    .tx-export-field {
+        flex: 1;
+        min-width: 180px;
     }
 
     .sheet-toolbar {

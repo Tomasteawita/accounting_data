@@ -23,14 +23,14 @@ urlpatterns = [
     ),
     path("transacciones/", views.transactions_view, name="transactions"),
     path(
-        "transacciones/plantilla/",
-        views.transactions_template_view,
-        name="transactions_template",
-    ),
-    path(
         "transacciones/exportar/",
         views.transactions_export_view,
         name="transactions_export",
+    ),
+    path(
+        "transacciones/plantilla/",
+        views.transactions_template_view,
+        name="transactions_template",
     ),
     path("metricas/", views.metrics_view, name="metrics"),
     # Autenticación y Registro
