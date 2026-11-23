@@ -13,9 +13,17 @@ from django.contrib.auth.forms import (
     UserChangeForm,
     UserCreationForm,
 )
+from django.db.models import Q
 from django.template import loader
 
-from .models import Client, Cliente, MAX_PDF_SIZE_BYTES, Transaction
+from .models import (
+    Client,
+    Cliente,
+    MAX_PDF_SIZE_BYTES,
+    Transaction,
+    Vertical,
+    normalize_vertical_title_key,
+)
 from .utils import send_async_email
 
 CustomUser = get_user_model()
@@ -405,19 +413,191 @@ class ClienteForm(forms.ModelForm):
 
     def save(self, commit=True):
         instance = super().save(commit=False)
-        if self.user is not None and self.user.is_authenticated:
+        if self.user is not None and getattr(self.user, "is_authenticated", False):
             instance.user = self.user
+        instance.full_clean()
         if commit:
             instance.save()
         return instance
 
 
+class VerticalForm(forms.ModelForm):
+    """
+    ModelForm para dar de alta y actualizar Verticales de negocio.
+    Implementa normalización estricta con .strip(), unicidad case-insensitive
+    entre verticales activas del usuario y reactivación controlada si existe
+    una vertical previamente dada de baja con el mismo título.
+    """
+
+    class Meta:
+        model = Vertical
+        fields = ("title", "description")
+        widgets = {
+            "title": forms.TextInput(
+                attrs={
+                    "class": "form-input",
+                    "placeholder": "Ej: Consultoría Financiera",
+                    "maxlength": "120",
+                }
+            ),
+            "description": forms.Textarea(
+                attrs={
+                    "class": "form-input",
+                    "placeholder": "Descripción operativa de la vertical de negocio",
+                    "rows": "2",
+                }
+            ),
+        }
+
+    def __init__(self, *args, user=None, **kwargs):
+        self.user = user
+        self.reactivated_instance = None
+        super().__init__(*args, **kwargs)
+        self.fields["description"].required = False
+
+    def clean_title(self):
+        raw_title = (self.cleaned_data.get("title") or "").strip()
+        title = " ".join(raw_title.split())
+        if not title:
+            raise forms.ValidationError("El título de la vertical es obligatorio.")
+
+        if self.user is not None and self.user.is_authenticated:
+            target_key = normalize_vertical_title_key(title)
+            active_qs = Vertical.objects.filter(
+                user=self.user, is_active=True
+            )
+            if self.instance and self.instance.pk:
+                active_qs = active_qs.exclude(pk=self.instance.pk)
+            for existing in active_qs:
+                if (
+                    existing.title.strip().lower() == title.lower()
+                    or normalize_vertical_title_key(existing.title)
+                    == target_key
+                ):
+                    raise forms.ValidationError(
+                        "Ya existe una vertical activa con este título."
+                    )
+
+            if not (self.instance and self.instance.pk):
+                inactive_qs = Vertical.objects.filter(
+                    user=self.user, is_active=False
+                ).order_by("-id")
+                for inactive in inactive_qs:
+                    if (
+                        inactive.title.strip().lower() == title.lower()
+                        or normalize_vertical_title_key(inactive.title)
+                        == target_key
+                    ):
+                        self.reactivated_instance = inactive
+                        break
+        return title
+
+    def clean_description(self):
+        return (self.cleaned_data.get("description") or "").strip()
+
+    def save(self, commit=True):
+        if self.reactivated_instance is not None:
+            instance = self.reactivated_instance
+            instance.title = self.cleaned_data["title"]
+            new_desc = self.cleaned_data.get("description", "")
+            if new_desc:
+                instance.description = new_desc
+            instance.is_active = True
+            instance.deactivated_at = None
+            if commit:
+                instance.save()
+            self.instance = instance
+            return instance
+
+        instance = super().save(commit=False)
+        if self.user is not None and self.user.is_authenticated:
+            instance.user = self.user
+        instance.is_active = True
+        instance.deactivated_at = None
+        if commit:
+            instance.save()
+        return instance
+
+
+class VerticalChoiceField(forms.ModelChoiceField):
+    """
+    ModelChoiceField que etiqueta visualmente como '(Inactiva)' cualquier vertical
+    dada de baja que permanezca asociada a una transacción histórica en edición.
+    """
+
+    def label_from_instance(self, obj):
+        if not obj.is_active:
+            return f"{obj.title} (Inactiva)"
+        return obj.title
+
+
+def resolve_user_vertical_input(user, raw_value, instance=None):
+    """
+    Resuelve el valor entrante para `vertical` en TransactionForm:
+    - Si está vacío: devuelve "".
+    - Si es un ID numérico perteneciente al usuario: devuelve ese ID.
+    - Si es un título (string): busca en las verticales del usuario (priorizando activas);
+      si coincide con una vertical del usuario (activa o inactiva), devuelve su PK para que
+      el validador de formulario evalúe si está activa o si es conservación histórica.
+      Si no existe en la cuenta del usuario, retorna un marcador inválido para rechazarlo.
+    """
+    if raw_value is None:
+        return ""
+    if isinstance(raw_value, Vertical):
+        return str(raw_value.pk)
+
+    val_str = " ".join(str(raw_value).strip().split())
+    if not val_str or val_str.lower() in (
+        "nan",
+        "none",
+        "-",
+        "— sin vertical —",
+        "sin vertical",
+    ):
+        return ""
+
+    if user is None or not getattr(user, "is_authenticated", False):
+        return val_str
+
+    if val_str.isdigit():
+        return val_str
+
+    # Permitir que el título venga con el sufijo "(Inactiva)" desde la UI
+    cleaned_title = val_str
+    if cleaned_title.lower().endswith("(inactiva)"):
+        cleaned_title = cleaned_title[: -len("(inactiva)")].strip()
+
+    target_key = normalize_vertical_title_key(cleaned_title)
+    user_verticals = list(
+        Vertical.objects.filter(user=user).order_by("-is_active", "-id")
+    )
+    for v in user_verticals:
+        if (
+            v.title.strip().lower() == cleaned_title.lower()
+            or normalize_vertical_title_key(v.title) == target_key
+        ):
+            return str(v.pk)
+
+    return "__INVALID_VERTICAL__"
+
+
 class TransactionForm(forms.ModelForm):
     """
     ModelForm para la creación y edición de registros de Transaction con la estructura
-    contable de 8 campos: Fecha, Vertical, Tipo, Concepto, Cliente, Detalle, Monto y Moneda.
-    Permite ingresar el Cliente por nombre o por ID, registrándolo automáticamente con su ID.
+    contable de 8 campos: Fecha, Vertical (FK PROTECT), Tipo, Concepto, Cliente, Detalle, Monto y Moneda.
+    Valida estrictamente que la vertical seleccionada pertenezca al usuario y esté activa,
+    salvo cuando se preserva la vertical histórica inactiva de una transacción ya existente.
     """
+
+    vertical = VerticalChoiceField(
+        queryset=Vertical.objects.none(),
+        required=False,
+        empty_label="— Sin vertical —",
+        widget=forms.Select(attrs={"class": "sheet-select"}),
+        error_messages={
+            "invalid_choice": "La vertical seleccionada no existe, no pertenece a su cuenta o fue dada de baja.",
+        },
+    )
 
     class Meta:
         model = Transaction
@@ -435,12 +615,6 @@ class TransactionForm(forms.ModelForm):
             "date": forms.DateInput(
                 format="%Y-%m-%d",
                 attrs={"type": "date", "class": "sheet-input"},
-            ),
-            "vertical": forms.TextInput(
-                attrs={
-                    "class": "sheet-input",
-                    "placeholder": "Unidad / Vertical",
-                },
             ),
             "transaction_type": forms.Select(
                 attrs={"class": "sheet-select"},
@@ -475,6 +649,16 @@ class TransactionForm(forms.ModelForm):
 
     def __init__(self, *args, user=None, **kwargs):
         self.user = user
+        instance = kwargs.get("instance")
+        if self.user is None and instance is not None and instance.user_id:
+            self.user = instance.user
+
+        self._original_vertical_id = (
+            instance.vertical_id if (instance and instance.pk) else None
+        )
+        self._rejected_inactive_vertical = False
+        self._rejected_foreign_or_missing_vertical = False
+
         data = kwargs.get("data")
         if data is None and len(args) > 0:
             data = args[0]
@@ -498,11 +682,34 @@ class TransactionForm(forms.ModelForm):
             raw_client = mutable.get("client")
             if not raw_client and mutable.get("client_name"):
                 raw_client = mutable.get("client_name")
-            if self.user is not None and self.user.is_authenticated and raw_client:
+            if self.user is not None and getattr(self.user, "is_authenticated", False) and raw_client:
                 resolved_client = resolve_or_create_client(self.user, raw_client)
                 mutable["client"] = resolved_client.pk if resolved_client else ""
             elif not raw_client:
                 mutable["client"] = ""
+
+            raw_vertical = mutable.get("vertical")
+            if (raw_vertical is None or raw_vertical == "") and mutable.get("vertical_id"):
+                raw_vertical = mutable.get("vertical_id")
+            resolved_vertical = resolve_user_vertical_input(
+                self.user, raw_vertical, instance=instance
+            )
+            if resolved_vertical == "__INVALID_VERTICAL__":
+                self._rejected_foreign_or_missing_vertical = True
+                mutable["vertical"] = ""
+            elif resolved_vertical.isdigit() and self.user is not None:
+                v_id = int(resolved_vertical)
+                v_obj = Vertical.objects.filter(pk=v_id, user=self.user).first()
+                if v_obj is None:
+                    self._rejected_foreign_or_missing_vertical = True
+                    mutable["vertical"] = ""
+                elif not v_obj.is_active and v_obj.id != self._original_vertical_id:
+                    self._rejected_inactive_vertical = True
+                    mutable["vertical"] = ""
+                else:
+                    mutable["vertical"] = str(v_obj.id)
+            else:
+                mutable["vertical"] = resolved_vertical
 
             if len(args) > 0:
                 args = (mutable,) + args[1:]
@@ -515,19 +722,56 @@ class TransactionForm(forms.ModelForm):
         self.fields["currency"].required = False
         self.fields["client"].required = False
         self.fields["client"].empty_label = "— Sin cliente —"
-        if self.user is not None and self.user.is_authenticated:
+        self.fields["vertical"].empty_label = "— Sin vertical —"
+
+        target_user_id = (
+            self.user.id
+            if (self.user is not None and getattr(self.user, "is_authenticated", False))
+            else (
+                self.instance.user_id
+                if (self.instance and self.instance.pk and self.instance.user_id)
+                else None
+            )
+        )
+
+        if target_user_id:
             self.fields["client"].queryset = Client.objects.filter(
-                user=self.user
+                user_id=target_user_id
             ).order_by("name")
-        elif self.instance and self.instance.pk and self.instance.user_id:
-            self.fields["client"].queryset = Client.objects.filter(
-                user_id=self.instance.user_id
-            ).order_by("name")
+
+            vertical_filter = Q(user_id=target_user_id, is_active=True)
+            if self._original_vertical_id:
+                vertical_filter |= Q(
+                    user_id=target_user_id, pk=self._original_vertical_id
+                )
+            self.fields["vertical"].queryset = Vertical.objects.filter(
+                vertical_filter
+            ).order_by("-is_active", "title")
         else:
             self.fields["client"].queryset = Client.objects.none()
+            self.fields["vertical"].queryset = Vertical.objects.none()
 
     def clean_vertical(self):
-        return (self.cleaned_data.get("vertical") or "").strip()
+        if self._rejected_inactive_vertical:
+            raise forms.ValidationError(
+                "No se puede asignar una vertical dada de baja (inactiva) a la transacción."
+            )
+        if self._rejected_foreign_or_missing_vertical:
+            raise forms.ValidationError(
+                "La vertical seleccionada no existe o no pertenece a su cuenta."
+            )
+        vertical = self.cleaned_data.get("vertical")
+        if vertical is None:
+            return None
+        if self.user is not None and vertical.user_id != self.user.id:
+            raise forms.ValidationError(
+                "La vertical seleccionada no pertenece a su cuenta."
+            )
+        if not vertical.is_active and vertical.id != self._original_vertical_id:
+            raise forms.ValidationError(
+                "No se puede asignar una vertical dada de baja (inactiva) a la transacción."
+            )
+        return vertical
 
     def clean_concept(self):
         concept = (self.cleaned_data.get("concept") or "").strip()
@@ -554,8 +798,9 @@ class TransactionForm(forms.ModelForm):
 
     def save(self, commit=True):
         instance = super().save(commit=False)
-        if self.user is not None and self.user.is_authenticated:
+        if self.user is not None and getattr(self.user, "is_authenticated", False):
             instance.user = self.user
+        instance.full_clean()
         if commit:
             instance.save()
         return instance

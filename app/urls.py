@@ -15,6 +15,12 @@ urlpatterns = [
     path("clientes/crear/", views.client_create_view, name="client_create"),
     path("clientes/<int:pk>/editar/", views.client_update_view, name="client_update"),
     path("clientes/<int:pk>/eliminar/", views.client_delete_view, name="client_delete"),
+    path("verticales/", views.verticals_view, name="verticals"),
+    path(
+        "verticales/<int:pk>/baja/",
+        views.vertical_deactivate_view,
+        name="vertical_deactivate",
+    ),
     path("transacciones/", views.transactions_view, name="transactions"),
     path(
         "transacciones/exportar/",

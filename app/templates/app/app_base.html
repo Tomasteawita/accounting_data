@@ -60,6 +60,14 @@
                     </li>
                     <li class="app-nav-item">
                         <a
+                            href="{% url 'app:verticals' %}"
+                            class="app-nav-link {% if current_url == 'verticals' %}app-nav-link--active{% endif %}"
+                            {% if current_url == 'verticals' %}aria-current="page"{% endif %}>
+                            Verticales
+                        </a>
+                    </li>
+                    <li class="app-nav-item">
+                        <a
                             href="{% url 'app:transactions' %}"
                             class="app-nav-link {% if current_url == 'transactions' %}app-nav-link--active{% endif %}"
                             {% if current_url == 'transactions' %}aria-current="page"{% endif %}>

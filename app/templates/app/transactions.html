@@ -20,8 +20,16 @@
         <div class="tx-upload-info">
             <h2 class="tx-panel-heading">Ingesta Masiva en Memoria (CSV / Excel)</h2>
             <p class="tx-panel-help">
-                Estructura de columnas: <code>Fecha</code> (YYYY-MM-DD), <code>Vertical</code>, <code>Tipo</code> (Gasto/Ingreso), <code>Concepto</code>, <code>Cliente</code> (nombre o ID), <code>Detalle</code>, <code>Monto</code> y <code>Moneda</code> (ARS/USD). Límite: 5 MB en RAM.
+                Estructura de columnas: <code>Fecha</code> (YYYY-MM-DD), <code>Vertical</code> (solo verticales activas registradas), <code>Tipo</code> (Gasto/Ingreso), <code>Concepto</code>, <code>Cliente</code> (nombre o ID), <code>Detalle</code>, <code>Monto</code> y <code>Moneda</code> (ARS/USD). Límite: 5 MB en RAM.
             </p>
+            <div class="tx-template-links">
+                <a href="{% url 'app:transactions_template' %}" class="btn-row-action">
+                    Descargar Plantilla Excel (.xlsx)
+                </a>
+                <a href="{% url 'app:transactions_export' %}" class="btn-row-action">
+                    Exportar Transacciones (.xlsx)
+                </a>
+            </div>
         </div>
         <form id="bulk-upload-form" class="tx-upload-form" method="post" action="{% url 'app:transactions' %}" enctype="multipart/form-data" novalidate>
             {% csrf_token %}
@@ -95,6 +103,14 @@
         {% endfor %}
     </datalist>
 
+    <script id="active-verticals-data" type="application/json">
+        [
+            {% for v in active_verticals %}
+            {"id": {{ v.id }}, "title": "{{ v.title|escapejs }}"}{% if not forloop.last %},{% endif %}
+            {% endfor %}
+        ]
+    </script>
+
     <!-- Tabla Editable Tipo Hoja de Cálculo (8 Columnas Contables + Acciones) -->
     <div class="sheet-container">
         <div class="table-responsive-wrapper">
@@ -114,7 +130,11 @@
                 </thead>
                 <tbody id="transactions-tbody">
                     {% for tx in transactions %}
-                    <tr class="sheet-row" data-id="{{ tx.id }}" data-client-id="{{ tx.client_id|default:'' }}" data-dirty="false">
+                    <tr class="sheet-row"
+                        data-id="{{ tx.id }}"
+                        data-client-id="{{ tx.client_id|default:'' }}"
+                        data-vertical-id="{{ tx.vertical_id|default:'' }}"
+                        data-dirty="false">
                         <td class="cell-date">
                             <input
                                 type="date"
@@ -126,15 +146,15 @@
                                 aria-label="Fecha">
                         </td>
                         <td class="cell-vertical">
-                            <input
-                                type="text"
-                                name="vertical"
-                                class="sheet-input"
-                                value="{{ tx.vertical }}"
-                                maxlength="120"
-                                placeholder="Unidad de negocio"
-                                disabled
-                                aria-label="Vertical">
+                            <select name="vertical" class="sheet-select" disabled aria-label="Vertical">
+                                <option value="" {% if not tx.vertical_id %}selected{% endif %}>— Sin vertical —</option>
+                                {% for v in active_verticals %}
+                                    <option value="{{ v.id }}" {% if tx.vertical_id == v.id %}selected{% endif %}>{{ v.title }}</option>
+                                {% endfor %}
+                                {% if tx.vertical_id and not tx.vertical.is_active %}
+                                    <option value="{{ tx.vertical.id }}" selected data-inactive="true">{{ tx.vertical.title }} (Inactiva)</option>
+                                {% endif %}
+                            </select>
                         </td>
                         <td class="cell-type">
                             <select name="transaction_type" class="sheet-select" disabled aria-label="Tipo">
@@ -293,6 +313,42 @@
     var exportStartInput = document.getElementById("export-fecha-desde");
     var exportEndInput = document.getElementById("export-fecha-hasta");
     var clientsDatalist = document.getElementById("clients-datalist");
+    var activeVerticalsScript = document.getElementById("active-verticals-data");
+    var activeVerticals = [];
+    if (activeVerticalsScript) {
+        try {
+            activeVerticals = JSON.parse(activeVerticalsScript.textContent || "[]");
+        } catch (e) {
+            activeVerticals = [];
+        }
+    }
+
+    function escapeHTML(str) {
+        return String(str || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    }
+
+    function buildVerticalOptionsHTML(txData, isNew) {
+        var selectedId = txData && txData.vertical_id ? String(txData.vertical_id) : "";
+        var html = '<option value=""' + (!selectedId ? " selected" : "") + ">— Sin vertical —</option>";
+        var foundInActive = false;
+        for (var i = 0; i < activeVerticals.length; i++) {
+            var v = activeVerticals[i];
+            var vIdStr = String(v.id);
+            var isSel = selectedId && selectedId === vIdStr;
+            if (isSel) foundInActive = true;
+            html += '<option value="' + escapeHTML(vIdStr) + '"' + (isSel ? " selected" : "") + ">" + escapeHTML(v.title) + "</option>";
+        }
+        // Si es una transacción histórica con una vertical que fue dada de baja (inactiva), se preserva y marca visualmente
+        if (!isNew && selectedId && !foundInActive && txData.vertical_title) {
+            var inactLabel = txData.vertical_title + (txData.vertical_is_active === false ? " (Inactiva)" : "");
+            html += '<option value="' + escapeHTML(selectedId) + '" selected data-inactive="true">' + escapeHTML(inactLabel) + "</option>";
+        }
+        return html;
+    }
 
     // Estado y controles de paginación
     var paginationNav = document.querySelector(".sheet-pagination");
@@ -399,6 +455,9 @@
                 showBanner("Error al cargar la página solicitada.", true);
                 return;
             }
+            if (Array.isArray(result.data.active_verticals)) {
+                activeVerticals = result.data.active_verticals;
+            }
             if (Array.isArray(result.data.transactions)) {
                 renderAllRows(result.data.transactions);
             }
@@ -474,10 +533,10 @@
         tr.className = "sheet-row" + (isNew ? " is-editing" : "");
         tr.setAttribute("data-id", txData.id ? String(txData.id) : "");
         tr.setAttribute("data-client-id", txData.client ? String(txData.client) : "");
+        tr.setAttribute("data-vertical-id", txData.vertical_id ? String(txData.vertical_id) : "");
         tr.setAttribute("data-dirty", isNew ? "true" : "false");
 
         var dateVal = txData.date || todayISO();
-        var verticalVal = txData.vertical || "";
         var typeVal = txData.transaction_type || "INGRESO";
         if (typeVal === "EGRESO") typeVal = "GASTO";
         var conceptVal = txData.concept || "";
@@ -492,7 +551,9 @@
                 '<input type="date" name="date" class="sheet-input" value="' + dateVal + '" ' + disabledAttr + ' required aria-label="Fecha">' +
             "</td>" +
             '<td class="cell-vertical">' +
-                '<input type="text" name="vertical" class="sheet-input" maxlength="120" placeholder="Unidad de negocio" ' + disabledAttr + ' aria-label="Vertical">' +
+                '<select name="vertical" class="sheet-select" ' + disabledAttr + ' aria-label="Vertical">' +
+                    buildVerticalOptionsHTML(txData, isNew) +
+                "</select>" +
             "</td>" +
             '<td class="cell-type">' +
                 '<select name="transaction_type" class="sheet-select" ' + disabledAttr + ' aria-label="Tipo">' +
@@ -525,8 +586,6 @@
                 "</div>" +
             "</td>";
 
-        var verticalInput = tr.querySelector("input[name='vertical']");
-        if (verticalInput) verticalInput.value = verticalVal;
         var conceptInput = tr.querySelector("input[name='concept']");
         if (conceptInput) conceptInput.value = conceptVal;
         var clientInput = tr.querySelector("input[name='client']");
@@ -554,7 +613,7 @@
     function extractRowPayload(tr) {
         var idVal = tr.getAttribute("data-id") || "";
         var dateInput = tr.querySelector("input[name='date']");
-        var verticalInput = tr.querySelector("input[name='vertical']");
+        var verticalSelect = tr.querySelector("select[name='vertical']");
         var typeSelect = tr.querySelector("select[name='transaction_type']");
         var conceptInput = tr.querySelector("input[name='concept']");
         var clientInput = tr.querySelector("input[name='client']");
@@ -565,7 +624,7 @@
         return {
             id: idVal ? parseInt(idVal, 10) : null,
             date: dateInput ? dateInput.value.trim() : "",
-            vertical: verticalInput ? verticalInput.value.trim() : "",
+            vertical: verticalSelect ? verticalSelect.value.trim() : "",
             transaction_type: typeSelect ? typeSelect.value : "INGRESO",
             concept: conceptInput ? conceptInput.value.trim() : "",
             client: clientInput ? clientInput.value.trim() : "",
@@ -584,6 +643,7 @@
                     id: "",
                     date: todayISO(),
                     vertical: "",
+                    vertical_id: "",
                     transaction_type: "INGRESO",
                     concept: "",
                     client: "",
@@ -600,7 +660,7 @@
                 tbody.appendChild(newRow);
             }
             updateDirtyCounter();
-            var verticalField = newRow.querySelector("input[name='vertical']");
+            var verticalField = newRow.querySelector("select[name='vertical']");
             if (verticalField) {
                 verticalField.focus();
             }
@@ -744,6 +804,9 @@
                 if (Array.isArray(result.data.clients)) {
                     updateClientsDatalist(result.data.clients);
                 }
+                if (Array.isArray(result.data.active_verticals)) {
+                    activeVerticals = result.data.active_verticals;
+                }
                 if (Array.isArray(result.data.transactions)) {
                     renderAllRows(result.data.transactions);
                 }
@@ -798,6 +861,9 @@
                 uploadForm.reset();
                 if (Array.isArray(result.data.clients)) {
                     updateClientsDatalist(result.data.clients);
+                }
+                if (Array.isArray(result.data.active_verticals)) {
+                    activeVerticals = result.data.active_verticals;
                 }
                 if (Array.isArray(result.data.transactions)) {
                     renderAllRows(result.data.transactions);
