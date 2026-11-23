@@ -30,7 +30,7 @@ from django.core.paginator import Paginator
 from django.db import transaction as db_transaction
 from django.db.models import Sum
 from django.db.models.functions import ExtractMonth, ExtractYear
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse_lazy
 from django.utils.encoding import force_str
@@ -1230,6 +1230,173 @@ def transactions_view(request):
         },
         status=400,
     )
+
+
+TRANSACTION_SPREADSHEET_COLUMNS = [
+    "Fecha",
+    "Vertical",
+    "Tipo",
+    "Concepto",
+    "Cliente",
+    "Detalle",
+    "Monto",
+    "Moneda",
+]
+
+XLSX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+
+def _build_excel_bytes(rows_data, sheet_name="Transacciones"):
+    """
+    Construye un archivo Excel (.xlsx) estrictamente en memoria (io.BytesIO + pandas/openpyxl)
+    con las 8 columnas operativas exactas y libera inmediatamente el DataFrame y el buffer.
+    """
+    buffer = io.BytesIO()
+    df = pd.DataFrame(rows_data, columns=TRANSACTION_SPREADSHEET_COLUMNS)
+    try:
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+        return buffer.getvalue()
+    finally:
+        del df
+        buffer.close()
+        del buffer
+        gc.collect()
+
+
+def _export_error_response(request, message, status=400):
+    """
+    Devuelve una respuesta de error de validación en JSON cuando la petición proviene
+    de Fetch API / AJAX, o redirige a la vista de Transacciones con un mensaje en caso contrario.
+    """
+    is_ajax = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in request.headers.get("Accept", "")
+    )
+    if is_ajax:
+        return JsonResponse({"status": "error", "message": message}, status=status)
+    messages.error(request, message)
+    return redirect("app:transactions")
+
+
+@login_required
+@require_http_methods(["GET"])
+def transactions_template_view(request):
+    """
+    Genera y descarga en memoria una plantilla Excel (.xlsx) con las 8 cabeceras
+    esperadas por el importador y filas guía válidas listas para completar o reimportar.
+    """
+    sample_rows = [
+        {
+            "Fecha": "2026-11-01",
+            "Vertical": "Consultoría",
+            "Tipo": "Ingreso",
+            "Concepto": "Honorarios Mensuales",
+            "Cliente": "Cliente Ejemplo S.A.",
+            "Detalle": "Abono mensual (fila guía de ejemplo)",
+            "Monto": "150000.00",
+            "Moneda": "ARS",
+        },
+        {
+            "Fecha": "2026-11-02",
+            "Vertical": "Operaciones",
+            "Tipo": "Gasto",
+            "Concepto": "Licencias Software",
+            "Cliente": "",
+            "Detalle": "Infraestructura cloud (fila guía de ejemplo)",
+            "Monto": "25.50",
+            "Moneda": "USD",
+        },
+    ]
+    excel_bytes = _build_excel_bytes(sample_rows, sheet_name="Plantilla")
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = (
+        'attachment; filename="plantilla_transacciones.xlsx"'
+    )
+    return response
+
+
+@login_required
+@require_http_methods(["GET"])
+def transactions_export_view(request):
+    """
+    Exporta las transacciones del usuario autenticado filtradas por rango de fechas
+    (`fecha_desde` y `fecha_hasta`, formato YYYY-MM-DD) en un archivo `.xlsx` en memoria
+    100% compatible con el flujo de importación.
+    """
+    raw_start = (
+        request.GET.get("fecha_desde") or request.GET.get("start_date") or ""
+    ).strip()
+    raw_end = (
+        request.GET.get("fecha_hasta") or request.GET.get("end_date") or ""
+    ).strip()
+
+    if not raw_start or not raw_end:
+        return _export_error_response(
+            request,
+            "Error de validación: Debe especificar las fechas 'Desde' y 'Hasta' para exportar.",
+            status=400,
+        )
+
+    try:
+        start_date = _parse_date_value(raw_start)
+        end_date = _parse_date_value(raw_end)
+    except ValueError:
+        return _export_error_response(
+            request,
+            "Error de validación: Formato de fecha inválido. Utilice el formato YYYY-MM-DD.",
+            status=400,
+        )
+
+    if start_date > end_date:
+        return _export_error_response(
+            request,
+            "Error de validación: La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.",
+            status=400,
+        )
+
+    qs = (
+        Transaction.objects.filter(
+            user=request.user,
+            date__gte=start_date,
+            date__lte=end_date,
+        )
+        .select_related("client")
+        .order_by("date", "id")
+    )
+
+    rows_data = [
+        {
+            "Fecha": tx.date.strftime("%Y-%m-%d"),
+            "Vertical": tx.vertical or "",
+            "Tipo": (
+                "Ingreso"
+                if tx.transaction_type == Transaction.TransactionType.INCOME
+                else "Gasto"
+            ),
+            "Concepto": tx.concept,
+            "Cliente": tx.client.name if tx.client_id and tx.client else "",
+            "Detalle": tx.detail or "",
+            "Monto": f"{Decimal(tx.amount):.2f}",
+            "Moneda": tx.currency or Transaction.Currency.ARS,
+        }
+        for tx in qs
+    ]
+
+    if not rows_data:
+        return _export_error_response(
+            request,
+            f"No se encontraron transacciones registradas entre {start_date.strftime('%Y-%m-%d')} y {end_date.strftime('%Y-%m-%d')}.",
+            status=404,
+        )
+
+    excel_bytes = _build_excel_bytes(rows_data, sheet_name="Transacciones")
+    filename = f"transacciones_{start_date.strftime('%Y-%m-%d')}_a_{end_date.strftime('%Y-%m-%d')}.xlsx"
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
 
 
 @login_required
