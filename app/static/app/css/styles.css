@@ -1166,6 +1166,48 @@ body {
 }
 
 /* ==========================================================================
+   8.5 Módulo de Verticales — Formulario de Alta y Tabla con Baja Lógica
+   ========================================================================== */
+.vertical-form-fields {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.875rem;
+}
+
+.verticals-sheet-table {
+    min-width: 680px;
+}
+
+.col-vertical-id {
+    width: 90px;
+}
+
+.col-vertical-title {
+    min-width: 220px;
+}
+
+.col-vertical-desc {
+    min-width: 260px;
+}
+
+.tx-template-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.625rem;
+    margin-top: 0.5rem;
+}
+
+.tx-template-links .btn-row-action {
+    flex: 0 0 auto;
+    width: auto;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.375rem 0.75rem;
+}
+
+/* ==========================================================================
    9. Módulo de Estado de Resultados (P&L Mensual — Inicio / Dashboard)
    Paleta estrictamente acromática: #F8F9FA, #EFEFEF / #F2F2F2, #1A1A1A, #4D4D4D, #CCCCCC
    ========================================================================== */
@@ -1806,6 +1848,10 @@ tr.pnl-section-header-row.is-collapsed {
     .client-cancel-btn {
         width: auto;
         min-width: 180px;
+    }
+
+    .vertical-form-fields {
+        grid-template-columns: 1fr 2fr;
     }
 }
 

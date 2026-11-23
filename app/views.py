@@ -30,7 +30,7 @@ from django.core.paginator import Paginator
 from django.db import transaction as db_transaction
 from django.db.models import Sum
 from django.db.models.functions import ExtractMonth, ExtractYear
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse_lazy
 from django.utils.encoding import force_str
@@ -46,8 +46,15 @@ from .forms import (
     ResendActivationForm,
     TransactionBulkUploadForm,
     TransactionForm,
+    VerticalForm,
 )
-from .models import Client, Cliente, Transaction
+from .models import (
+    Client,
+    Cliente,
+    Transaction,
+    Vertical,
+    normalize_vertical_title_key,
+)
 from .utils import send_activation_email
 
 CustomUser = get_user_model()
@@ -361,10 +368,10 @@ def dashboard_view(request):
         available_years = [current_year]
 
     raw_verticals = list(
-        user_tx_qs.exclude(vertical="")
-        .values_list("vertical", flat=True)
+        user_tx_qs.filter(vertical__isnull=False)
+        .values_list("vertical__title", flat=True)
         .distinct()
-        .order_by("vertical")
+        .order_by("vertical__title")
     )
     available_verticals = [v for v in raw_verticals if v]
 
@@ -400,7 +407,10 @@ def dashboard_view(request):
         currency=selected_currency,
     )
     if selected_vertical:
-        pnl_qs = pnl_qs.filter(vertical=selected_vertical)
+        if selected_vertical.isdigit():
+            pnl_qs = pnl_qs.filter(vertical_id=int(selected_vertical))
+        else:
+            pnl_qs = pnl_qs.filter(vertical__title__iexact=selected_vertical)
 
     monthly_aggregates = (
         pnl_qs.annotate(month=ExtractMonth("date"))
@@ -734,12 +744,279 @@ def client_delete_view(request, pk):
     )
 
 
+def _serialize_vertical(v):
+    """Serializa una instancia de Vertical de negocio."""
+    return {
+        "id": v.id,
+        "title": v.title,
+        "description": v.description or "",
+        "is_active": bool(v.is_active),
+        "deactivated_at": (
+            v.deactivated_at.isoformat() if v.deactivated_at else None
+        ),
+        "created_at": (
+            v.created_at.strftime("%Y-%m-%d")
+            if hasattr(v.created_at, "strftime")
+            else ""
+        ),
+    }
+
+
+def _paginate_user_verticals(user, page=1, per_page=DEFAULT_PAGE_SIZE):
+    """
+    Ejecuta la paginación en base de datos para las verticales ACTIVAS del usuario
+    y devuelve (page_obj, pagination_meta_dict).
+    """
+    per_page = max(1, min(int(per_page), MAX_PAGE_SIZE))
+    qs = Vertical.objects.filter(user=user, is_active=True).order_by("title", "-id")
+    paginator = Paginator(qs, per_page)
+    page_obj = paginator.get_page(page)
+
+    pagination_meta = {
+        "page": page_obj.number,
+        "per_page": per_page,
+        "total_pages": paginator.num_pages,
+        "total_count": paginator.count,
+        "has_previous": page_obj.has_previous(),
+        "has_next": page_obj.has_next(),
+        "previous_page": (
+            page_obj.previous_page_number() if page_obj.has_previous() else None
+        ),
+        "next_page": page_obj.next_page_number() if page_obj.has_next() else None,
+        "start_index": page_obj.start_index() if paginator.count > 0 else 0,
+        "end_index": page_obj.end_index() if paginator.count > 0 else 0,
+    }
+    return page_obj, pagination_meta
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def verticals_view(request):
+    """
+    Lista exclusivamente las verticales activas del usuario y procesa peticiones POST
+    (alta de vertical o baja lógica con is_active=False) dentro de transaction.atomic().
+    """
+    if request.method == "GET":
+        page, per_page = _parse_pagination_params(request.GET)
+        page_obj, pagination_meta = _paginate_user_verticals(
+            request.user, page=page, per_page=per_page
+        )
+        is_ajax = (
+            request.headers.get("X-Requested-With") == "XMLHttpRequest"
+            or "application/json" in request.headers.get("Accept", "")
+        )
+        if is_ajax:
+            return JsonResponse(
+                {
+                    "status": "ok",
+                    "verticals": [
+                        _serialize_vertical(v) for v in page_obj.object_list
+                    ],
+                    "pagination": pagination_meta,
+                }
+            )
+
+        form = VerticalForm(user=request.user)
+        return render(
+            request,
+            "app/verticals.html",
+            {
+                "verticals": page_obj.object_list,
+                "page_obj": page_obj,
+                "pagination": pagination_meta,
+                "per_page": per_page,
+                "allowed_page_sizes": ALLOWED_PAGE_SIZES,
+                "form": form,
+            },
+        )
+
+    content_type = request.content_type or ""
+    if "application/json" in content_type:
+        try:
+            payload = json.loads(request.body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return JsonResponse(
+                {"status": "error", "message": "Formato JSON inválido."},
+                status=400,
+            )
+    else:
+        payload = request.POST.dict()
+
+    page, per_page = _parse_pagination_params(payload, request.GET)
+    action = payload.get("action") or "create"
+
+    # 1. Baja lógica de vertical (nunca se elimina físicamente de la base de datos)
+    if action in ("deactivate", "delete"):
+        vertical_id = payload.get("id")
+        if not vertical_id:
+            return JsonResponse(
+                {"status": "error", "message": "ID de vertical requerido."},
+                status=400,
+            )
+        with db_transaction.atomic():
+            vertical = get_object_or_404(
+                Vertical, pk=vertical_id, user=request.user
+            )
+            vertical.deactivate()
+
+        page_obj, pagination_meta = _paginate_user_verticals(
+            request.user, page=page, per_page=per_page
+        )
+        return JsonResponse(
+            {
+                "status": "ok",
+                "message": f"Vertical '{vertical.title}' dada de baja correctamente.",
+                "deactivated_id": vertical.id,
+                "verticals": [
+                    _serialize_vertical(v) for v in page_obj.object_list
+                ],
+                "pagination": pagination_meta,
+            }
+        )
+
+    # 2. Guardado masivo de ediciones en la tabla ("Guardar Cambios", igual que en Transacciones)
+    if action == "bulk_save":
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or not rows:
+            return JsonResponse(
+                {
+                    "status": "error",
+                    "message": "No hay cambios pendientes para guardar.",
+                },
+                status=400,
+            )
+
+        saved_instances = []
+        try:
+            with db_transaction.atomic():
+                for idx, row_data in enumerate(rows, start=1):
+                    v_id = row_data.get("id")
+                    instance = None
+                    if v_id:
+                        instance = get_object_or_404(
+                            Vertical,
+                            pk=v_id,
+                            user=request.user,
+                            is_active=True,
+                        )
+                    form = VerticalForm(
+                        data=row_data, instance=instance, user=request.user
+                    )
+                    if not form.is_valid():
+                        err_detail = "; ".join(
+                            f"{', '.join(errs)}"
+                            for _, errs in form.errors.items()
+                        )
+                        raise ValueError(f"Fila {idx} inválida ({err_detail}).")
+                    v_obj = form.save()
+                    saved_instances.append(v_obj)
+        except ValueError as err:
+            return JsonResponse(
+                {"status": "error", "message": str(err)},
+                status=400,
+            )
+
+        page_obj, pagination_meta = _paginate_user_verticals(
+            request.user, page=page, per_page=per_page
+        )
+        return JsonResponse(
+            {
+                "status": "ok",
+                "message": f"Cambios confirmados: {len(saved_instances)} vertical(es) guardada(s).",
+                "saved_verticals": [
+                    _serialize_vertical(v) for v in saved_instances
+                ],
+                "verticals": [
+                    _serialize_vertical(v) for v in page_obj.object_list
+                ],
+                "pagination": pagination_meta,
+            }
+        )
+
+    # 3. Alta (o edición/reactivación controlada) de vertical individual
+    instance = None
+    if action == "update" and payload.get("id"):
+        instance = get_object_or_404(
+            Vertical, pk=payload.get("id"), user=request.user
+        )
+
+    form = VerticalForm(data=payload, instance=instance, user=request.user)
+    if form.is_valid():
+        with db_transaction.atomic():
+            was_reactivated = form.reactivated_instance is not None
+            vertical_obj = form.save()
+
+        status_code = 200 if (instance or was_reactivated) else 201
+        page_obj, pagination_meta = _paginate_user_verticals(
+            request.user, page=page, per_page=per_page
+        )
+        if was_reactivated:
+            msg = f"Vertical '{vertical_obj.title}' reactivada correctamente."
+        elif instance:
+            msg = "Vertical actualizada correctamente."
+        else:
+            msg = "Vertical creada correctamente."
+
+        return JsonResponse(
+            {
+                "status": "ok",
+                "message": msg,
+                "reactivated": was_reactivated,
+                "vertical": _serialize_vertical(vertical_obj),
+                "verticals": [
+                    _serialize_vertical(v) for v in page_obj.object_list
+                ],
+                "pagination": pagination_meta,
+            },
+            status=status_code,
+        )
+
+    error_summary = "; ".join(
+        f"{', '.join(errs)}" for _, errs in form.errors.items()
+    )
+    return JsonResponse(
+        {
+            "status": "error",
+            "message": error_summary
+            or "Error de validación en los datos de la vertical.",
+            "errors": form.errors,
+        },
+        status=400,
+    )
+
+
+@login_required
+@require_http_methods(["POST"])
+def vertical_deactivate_view(request, pk):
+    """Endpoint dedicado para dar de baja lógica una vertical activa perteneciente al usuario."""
+    with db_transaction.atomic():
+        vertical = get_object_or_404(Vertical, pk=pk, user=request.user)
+        vertical.deactivate()
+    return JsonResponse(
+        {
+            "status": "ok",
+            "message": f"Vertical '{vertical.title}' dada de baja correctamente.",
+            "deactivated_id": vertical.id,
+        }
+    )
+
+
 def _serialize_transaction(tx):
     """Serializa una instancia de Transaction con los 8 campos operativos."""
+    v_obj = tx.vertical if tx.vertical_id else None
+    v_title = v_obj.title if v_obj else ""
+    v_active = bool(v_obj.is_active) if v_obj else True
+    v_display = (
+        f"{v_title} (Inactiva)" if (v_obj and not v_active) else v_title
+    )
     return {
         "id": tx.id,
         "date": tx.date.strftime("%Y-%m-%d") if hasattr(tx.date, "strftime") else str(tx.date),
-        "vertical": tx.vertical or "",
+        "vertical": v_title,
+        "vertical_id": tx.vertical_id or "",
+        "vertical_title": v_title,
+        "vertical_is_active": v_active,
+        "vertical_display": v_display,
         "transaction_type": tx.transaction_type,
         "transaction_type_display": tx.get_transaction_type_display(),
         "concept": tx.concept,
@@ -879,82 +1156,152 @@ def _process_in_memory_spreadsheet(uploaded_file, user):
         clients_by_name = {c.name.strip().lower(): c for c in user_clients}
         clients_by_id = {c.id: c for c in user_clients}
 
+        user_verticals = list(Vertical.objects.filter(user=user))
+        active_verticals_by_id = {
+            v.id: v for v in user_verticals if v.is_active
+        }
+        inactive_verticals_by_id = {
+            v.id: v for v in user_verticals if not v.is_active
+        }
+        active_verticals_by_title = {}
+        inactive_verticals_by_title = {}
+        for v in user_verticals:
+            exact_key = " ".join(v.title.strip().lower().split())
+            norm_key = normalize_vertical_title_key(v.title)
+            if v.is_active:
+                active_verticals_by_title[exact_key] = v
+                active_verticals_by_title[norm_key] = v
+            else:
+                inactive_verticals_by_title[exact_key] = v
+                inactive_verticals_by_title[norm_key] = v
+
         transactions_to_create = []
-        for idx, row in df.iterrows():
-            row_num = idx + 2
-            raw_date = str(row[col_map["date"]]).strip()
-            raw_type = str(row[col_map["transaction_type"]]).strip()
-            raw_concept = str(row[col_map["concept"]]).strip()
-            raw_amount = str(row[col_map["amount"]]).strip()
-            raw_vertical = (
-                str(row[col_map["vertical"]]).strip() if "vertical" in col_map else ""
-            )
-            raw_detail = (
-                str(row[col_map["detail"]]).strip() if "detail" in col_map else ""
-            )
-            raw_currency = (
-                str(row[col_map["currency"]]).strip() if "currency" in col_map else "ARS"
-            )
+        with db_transaction.atomic():
+            for idx, row in df.iterrows():
+                row_num = idx + 2
+                raw_date = str(row[col_map["date"]]).strip()
+                raw_type = str(row[col_map["transaction_type"]]).strip()
+                raw_concept = str(row[col_map["concept"]]).strip()
+                raw_amount = str(row[col_map["amount"]]).strip()
+                raw_vertical = (
+                    str(row[col_map["vertical"]]).strip()
+                    if "vertical" in col_map
+                    else ""
+                )
+                raw_detail = (
+                    str(row[col_map["detail"]]).strip()
+                    if "detail" in col_map
+                    else ""
+                )
+                raw_currency = (
+                    str(row[col_map["currency"]]).strip()
+                    if "currency" in col_map
+                    else "ARS"
+                )
 
-            if not any((raw_date, raw_type, raw_concept, raw_amount)):
-                continue
+                if not any((raw_date, raw_type, raw_concept, raw_amount)):
+                    continue
 
-            try:
-                parsed_date = _parse_date_value(raw_date)
-                parsed_type = _parse_type_value(raw_type)
-                parsed_amount = _parse_amount_value(raw_amount)
-                parsed_currency = _parse_currency_value(raw_currency)
-            except ValueError as err:
-                raise ValueError(f"Fila {row_num}: {err}") from err
+                try:
+                    parsed_date = _parse_date_value(raw_date)
+                    parsed_type = _parse_type_value(raw_type)
+                    parsed_amount = _parse_amount_value(raw_amount)
+                    parsed_currency = _parse_currency_value(raw_currency)
+                except ValueError as err:
+                    raise ValueError(f"Fila {row_num}: {err}") from err
 
-            if not raw_concept:
-                raise ValueError(f"Fila {row_num}: El concepto es obligatorio.")
+                if not raw_concept:
+                    raise ValueError(f"Fila {row_num}: El concepto es obligatorio.")
 
-            if raw_vertical.lower() in ("nan", "none"):
-                raw_vertical = ""
-            if raw_detail.lower() in ("nan", "none"):
-                raw_detail = ""
-
-            client_obj = None
-            if "client" in col_map:
-                raw_client = str(row[col_map["client"]]).strip()
-                if raw_client and raw_client.lower() not in (
+                raw_vertical_clean = " ".join(raw_vertical.split())
+                if raw_vertical_clean.lower() in (
                     "nan",
                     "none",
                     "-",
-                    "sin cliente",
-                    "— sin cliente —",
+                    "sin vertical",
+                    "— sin vertical —",
                 ):
-                    if raw_client.isdigit() and int(raw_client) in clients_by_id:
-                        client_obj = clients_by_id[int(raw_client)]
-                    else:
-                        client_key = raw_client.lower()
-                        client_obj = clients_by_name.get(client_key)
-                        if client_obj is None:
-                            client_obj = Client.objects.create(
-                                user=user, name=raw_client[:150]
+                    raw_vertical_clean = ""
+                if raw_detail.lower() in ("nan", "none"):
+                    raw_detail = ""
+
+                vertical_obj = None
+                if raw_vertical_clean:
+                    if raw_vertical_clean.isdigit():
+                        v_id = int(raw_vertical_clean)
+                        if v_id in active_verticals_by_id:
+                            vertical_obj = active_verticals_by_id[v_id]
+                        elif v_id in inactive_verticals_by_id:
+                            inact_v = inactive_verticals_by_id[v_id]
+                            raise ValueError(
+                                f"Fila {row_num}: La vertical '{inact_v.title}' se encuentra dada de baja (inactiva)."
                             )
-                            clients_by_name[client_key] = client_obj
-                            clients_by_id[client_obj.id] = client_obj
+                        else:
+                            raise ValueError(
+                                f"Fila {row_num}: La vertical con ID '{raw_vertical_clean}' no existe o no pertenece a su cuenta."
+                            )
+                    else:
+                        v_exact_key = raw_vertical_clean.lower()
+                        v_norm_key = normalize_vertical_title_key(
+                            raw_vertical_clean
+                        )
+                        vertical_obj = active_verticals_by_title.get(
+                            v_exact_key
+                        ) or active_verticals_by_title.get(v_norm_key)
+                        if vertical_obj is None:
+                            inact_v = inactive_verticals_by_title.get(
+                                v_exact_key
+                            ) or inactive_verticals_by_title.get(v_norm_key)
+                            if inact_v is not None:
+                                raise ValueError(
+                                    f"Fila {row_num}: La vertical '{raw_vertical_clean}' se encuentra dada de baja (inactiva)."
+                                )
+                            raise ValueError(
+                                f"Fila {row_num}: La vertical '{raw_vertical_clean}' no existe entre las verticales activas de su cuenta."
+                            )
 
-            transactions_to_create.append(
-                Transaction(
-                    user=user,
-                    date=parsed_date,
-                    vertical=raw_vertical[:120],
-                    transaction_type=parsed_type,
-                    concept=raw_concept[:150],
-                    client=client_obj,
-                    detail=raw_detail[:255],
-                    amount=parsed_amount,
-                    currency=parsed_currency,
+                client_obj = None
+                if "client" in col_map:
+                    raw_client = str(row[col_map["client"]]).strip()
+                    if raw_client and raw_client.lower() not in (
+                        "nan",
+                        "none",
+                        "-",
+                        "sin cliente",
+                        "— sin cliente —",
+                    ):
+                        if (
+                            raw_client.isdigit()
+                            and int(raw_client) in clients_by_id
+                        ):
+                            client_obj = clients_by_id[int(raw_client)]
+                        else:
+                            client_key = raw_client.lower()
+                            client_obj = clients_by_name.get(client_key)
+                            if client_obj is None:
+                                client_obj = Client.objects.create(
+                                    user=user, name=raw_client[:150]
+                                )
+                                clients_by_name[client_key] = client_obj
+                                clients_by_id[client_obj.id] = client_obj
+
+                transactions_to_create.append(
+                    Transaction(
+                        user=user,
+                        date=parsed_date,
+                        vertical=vertical_obj,
+                        transaction_type=parsed_type,
+                        concept=raw_concept[:150],
+                        client=client_obj,
+                        detail=raw_detail[:255],
+                        amount=parsed_amount,
+                        currency=parsed_currency,
+                    )
                 )
-            )
 
-        if not transactions_to_create:
-            raise ValueError("No se encontraron registros válidos en el archivo.")
+            if not transactions_to_create:
+                raise ValueError("No se encontraron registros válidos en el archivo.")
 
-        with db_transaction.atomic():
             created = Transaction.objects.bulk_create(
                 transactions_to_create, batch_size=500
             )
@@ -976,7 +1323,7 @@ def _paginate_user_transactions(user, page=1, per_page=DEFAULT_PAGE_SIZE):
     per_page = max(1, min(int(per_page), MAX_PAGE_SIZE))
     qs = (
         Transaction.objects.filter(user=user)
-        .select_related("client")
+        .select_related("client", "vertical")
         .order_by("-date", "-id")
     )
     paginator = Paginator(qs, per_page)
@@ -999,6 +1346,172 @@ def _paginate_user_transactions(user, page=1, per_page=DEFAULT_PAGE_SIZE):
     return page_obj, pagination_meta
 
 
+def _get_active_verticals_list(user):
+    """Retorna la lista serializada de verticales activas del usuario."""
+    return [
+        {"id": v.id, "title": v.title}
+        for v in Vertical.objects.filter(user=user, is_active=True).order_by(
+            "title"
+        )
+    ]
+
+
+def _generate_excel_template_bytes(user):
+    """
+    Genera en memoria un archivo Excel (.xlsx) de plantilla/referencia con dos hojas:
+    1. 'Transacciones': Columnas contables y fila de ejemplo usando la primera vertical activa del usuario.
+    2. 'Verticales_Activas': Catálogo actualizado de verticales activas disponibles del usuario.
+    """
+    active_verticals = list(
+        Vertical.objects.filter(user=user, is_active=True).order_by("title")
+    )
+    sample_vertical = (
+        active_verticals[0].title if active_verticals else ""
+    )
+    tx_df = pd.DataFrame(
+        [
+            {
+                "Fecha": datetime.now().strftime("%Y-%m-%d"),
+                "Vertical": sample_vertical,
+                "Tipo": "Ingreso",
+                "Concepto": "Honorarios Mensuales",
+                "Cliente": "Cliente Ejemplo",
+                "Detalle": "Abono mensual",
+                "Monto": "100000.00",
+                "Moneda": "ARS",
+            }
+        ],
+        columns=[
+            "Fecha",
+            "Vertical",
+            "Tipo",
+            "Concepto",
+            "Cliente",
+            "Detalle",
+            "Monto",
+            "Moneda",
+        ],
+    )
+    vert_df = pd.DataFrame(
+        [
+            {
+                "ID": v.id,
+                "Vertical": v.title,
+                "Descripcion": v.description or "",
+            }
+            for v in active_verticals
+        ],
+        columns=["ID", "Vertical", "Descripcion"],
+    )
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        tx_df.to_excel(writer, sheet_name="Transacciones", index=False)
+        vert_df.to_excel(writer, sheet_name="Verticales_Activas", index=False)
+    return output.getvalue()
+
+
+def _generate_excel_export_bytes(user):
+    """
+    Exporta en memoria todas las transacciones del usuario a un archivo Excel (.xlsx),
+    preservando las verticales históricas (incluso si fueron dadas de baja posteriormente)
+    y adjuntando la hoja de verticales activas.
+    """
+    tx_qs = (
+        Transaction.objects.filter(user=user)
+        .select_related("client", "vertical")
+        .order_by("-date", "-id")
+    )
+    rows = []
+    for tx in tx_qs:
+        v_title = tx.vertical.title if tx.vertical_id and tx.vertical else ""
+        rows.append(
+            {
+                "Fecha": (
+                    tx.date.strftime("%Y-%m-%d")
+                    if hasattr(tx.date, "strftime")
+                    else str(tx.date)
+                ),
+                "Vertical": v_title,
+                "Estado_Vertical": (
+                    "Activa"
+                    if (not tx.vertical_id or tx.vertical.is_active)
+                    else "Inactiva"
+                ),
+                "Tipo": tx.get_transaction_type_display(),
+                "Concepto": tx.concept,
+                "Cliente": tx.client.name if tx.client_id and tx.client else "",
+                "Detalle": tx.detail or "",
+                "Monto": f"{Decimal(tx.amount):.2f}",
+                "Moneda": tx.currency,
+            }
+        )
+    tx_df = pd.DataFrame(
+        rows,
+        columns=[
+            "Fecha",
+            "Vertical",
+            "Estado_Vertical",
+            "Tipo",
+            "Concepto",
+            "Cliente",
+            "Detalle",
+            "Monto",
+            "Moneda",
+        ],
+    )
+    active_verticals = list(
+        Vertical.objects.filter(user=user, is_active=True).order_by("title")
+    )
+    vert_df = pd.DataFrame(
+        [
+            {
+                "ID": v.id,
+                "Vertical": v.title,
+                "Descripcion": v.description or "",
+            }
+            for v in active_verticals
+        ],
+        columns=["ID", "Vertical", "Descripcion"],
+    )
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        tx_df.to_excel(writer, sheet_name="Transacciones", index=False)
+        vert_df.to_excel(writer, sheet_name="Verticales_Activas", index=False)
+    return output.getvalue()
+
+
+@login_required
+@require_http_methods(["GET"])
+def transactions_template_view(request):
+    """Descarga la plantilla Excel actualizada con las verticales activas del usuario."""
+    excel_bytes = _generate_excel_template_bytes(request.user)
+    response = HttpResponse(
+        excel_bytes,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = (
+        'attachment; filename="plantilla_transacciones.xlsx"'
+    )
+    return response
+
+
+@login_required
+@require_http_methods(["GET"])
+def transactions_export_view(request):
+    """Exporta las transacciones del usuario a Excel preservando verticales históricas."""
+    excel_bytes = _generate_excel_export_bytes(request.user)
+    response = HttpResponse(
+        excel_bytes,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = (
+        'attachment; filename="transacciones_exportadas.xlsx"'
+    )
+    return response
+
+
 @login_required
 @require_http_methods(["GET", "POST"])
 def transactions_view(request):
@@ -1008,6 +1521,12 @@ def transactions_view(request):
     guardar en lote (Guardar Cambios), eliminar e importar CSV/Excel en memoria.
     """
     if request.method == "GET":
+        download_mode = (request.GET.get("download") or "").strip().lower()
+        if download_mode == "template":
+            return transactions_template_view(request)
+        if download_mode == "export":
+            return transactions_export_view(request)
+
         page, per_page = _parse_pagination_params(request.GET)
         page_obj, pagination_meta = _paginate_user_transactions(
             request.user, page=page, per_page=per_page
@@ -1021,6 +1540,7 @@ def transactions_view(request):
             return JsonResponse(
                 {
                     "status": "ok",
+                    "active_verticals": _get_active_verticals_list(request.user),
                     "transactions": [
                         _serialize_transaction(tx) for tx in page_obj.object_list
                     ],
@@ -1029,6 +1549,9 @@ def transactions_view(request):
             )
 
         clients = Client.objects.filter(user=request.user).order_by("name")
+        active_verticals = Vertical.objects.filter(
+            user=request.user, is_active=True
+        ).order_by("title")
         form = TransactionForm(user=request.user)
         upload_form = TransactionBulkUploadForm()
         return render(
@@ -1041,6 +1564,7 @@ def transactions_view(request):
                 "per_page": per_page,
                 "allowed_page_sizes": ALLOWED_PAGE_SIZES,
                 "clients": clients,
+                "active_verticals": active_verticals,
                 "form": form,
                 "upload_form": upload_form,
             },
@@ -1097,6 +1621,7 @@ def transactions_view(request):
                 "message": f"Ingesta completada: {len(created_records)} transacciones procesadas en memoria.",
                 "imported_count": len(created_records),
                 "clients": all_clients,
+                "active_verticals": _get_active_verticals_list(request.user),
                 "transactions": [
                     _serialize_transaction(tx) for tx in page_obj.object_list
                 ],
@@ -1112,9 +1637,10 @@ def transactions_view(request):
                 {"status": "error", "message": "Identificador de transacción requerido."},
                 status=400,
             )
-        tx = get_object_or_404(Transaction, pk=tx_id, user=request.user)
-        deleted_id = tx.id
-        tx.delete()
+        with db_transaction.atomic():
+            tx = get_object_or_404(Transaction, pk=tx_id, user=request.user)
+            deleted_id = tx.id
+            tx.delete()
         page_obj, pagination_meta = _paginate_user_transactions(
             request.user, page=page, per_page=per_page
         )
@@ -1123,6 +1649,7 @@ def transactions_view(request):
                 "status": "ok",
                 "message": "Transacción eliminada correctamente.",
                 "deleted_id": deleted_id,
+                "active_verticals": _get_active_verticals_list(request.user),
                 "transactions": [
                     _serialize_transaction(item) for item in page_obj.object_list
                 ],
@@ -1178,6 +1705,7 @@ def transactions_view(request):
                 "status": "ok",
                 "message": f"Cambios confirmados: {len(saved_instances)} registro(s) guardado(s).",
                 "clients": all_clients,
+                "active_verticals": _get_active_verticals_list(request.user),
                 "saved_transactions": [_serialize_transaction(tx) for tx in saved_instances],
                 "transactions": [
                     _serialize_transaction(tx) for tx in page_obj.object_list
@@ -1199,7 +1727,8 @@ def transactions_view(request):
 
     form = TransactionForm(data=payload, instance=instance, user=request.user)
     if form.is_valid():
-        tx_obj = form.save()
+        with db_transaction.atomic():
+            tx_obj = form.save()
         status_code = 200 if instance else 201
         all_clients = [
             {"id": c.id, "name": c.name}
@@ -1214,6 +1743,7 @@ def transactions_view(request):
                     else "Transacción creada correctamente."
                 ),
                 "clients": all_clients,
+                "active_verticals": _get_active_verticals_list(request.user),
                 "transaction": _serialize_transaction(tx_obj),
             },
             status=status_code,

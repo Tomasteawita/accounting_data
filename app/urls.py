@@ -15,7 +15,23 @@ urlpatterns = [
     path("clientes/crear/", views.client_create_view, name="client_create"),
     path("clientes/<int:pk>/editar/", views.client_update_view, name="client_update"),
     path("clientes/<int:pk>/eliminar/", views.client_delete_view, name="client_delete"),
+    path("verticales/", views.verticals_view, name="verticals"),
+    path(
+        "verticales/<int:pk>/baja/",
+        views.vertical_deactivate_view,
+        name="vertical_deactivate",
+    ),
     path("transacciones/", views.transactions_view, name="transactions"),
+    path(
+        "transacciones/plantilla/",
+        views.transactions_template_view,
+        name="transactions_template",
+    ),
+    path(
+        "transacciones/exportar/",
+        views.transactions_export_view,
+        name="transactions_export",
+    ),
     path("metricas/", views.metrics_view, name="metrics"),
     # Autenticación y Registro
     path("auth/login/", views.CustomLoginView.as_view(), name="login"),

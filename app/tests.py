@@ -4,19 +4,22 @@ Cubre la Landing Page, el modelo CustomUser y los flujos completos de autenticac
 """
 
 from decimal import Decimal
+import io
 import json
 
+import pandas as pd
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.models.deletion import ProtectedError
 from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
-from .models import Client, Cliente, Transaction
+from .models import Client, Cliente, Transaction, Vertical
 
 CustomUser = get_user_model()
 
@@ -390,6 +393,7 @@ class DashboardAndNavigationTests(TestCase):
         self.app_routes = [
             ("app:dashboard", "app/dashboard.html", "Inicio"),
             ("app:clients", "app/clientes.html", "Clientes"),
+            ("app:verticals", "app/verticals.html", "Verticales"),
             ("app:transactions", "app/transactions.html", "Transacciones"),
             ("app:metrics", "app/metrics.html", "Métricas"),
         ]
@@ -429,17 +433,19 @@ class DashboardAndNavigationTests(TestCase):
             self.assertTemplateUsed(response, "app/app_base.html")
             self.assertTemplateUsed(response, expected_template)
 
-            # Verificar presencia de los 4 ítems del menú y controles del drawer/sidebar
+            # Verificar presencia de los 5 ítems del menú y controles del drawer/sidebar
             self.assertContains(response, 'id="app-sidebar"')
             self.assertContains(response, 'id="sidebar-toggle"')
             self.assertContains(response, 'id="sidebar-close"')
             self.assertContains(response, 'id="sidebar-backdrop"')
             self.assertContains(response, reverse("app:dashboard"))
             self.assertContains(response, reverse("app:clients"))
+            self.assertContains(response, reverse("app:verticals"))
             self.assertContains(response, reverse("app:transactions"))
             self.assertContains(response, reverse("app:metrics"))
             self.assertContains(response, "Inicio")
             self.assertContains(response, "Clientes")
+            self.assertContains(response, "Verticales")
             self.assertContains(response, "Transacciones")
             self.assertContains(response, "Métricas")
 
@@ -452,6 +458,8 @@ class DashboardAndNavigationTests(TestCase):
                 self.assertContains(response, 'id="transactions-table"')
             elif route_name == "app:clients":
                 self.assertContains(response, 'id="clients-table"')
+            elif route_name == "app:verticals":
+                self.assertContains(response, 'id="verticals-table"')
             else:
                 self.assertContains(
                     response,
@@ -481,6 +489,21 @@ class TransactionModuleTests(TestCase):
         )
         self.client_obj = Client.objects.create(
             user=self.user, name="Corporación Austral"
+        )
+        self.v_consultoria_fin = Vertical.objects.create(
+            user=self.user, title="Consultoría Financiera", is_active=True
+        )
+        self.v_balanz = Vertical.objects.create(
+            user=self.user, title="Inversiones Balanz", is_active=True
+        )
+        self.v_operaciones = Vertical.objects.create(
+            user=self.user, title="Operaciones", is_active=True
+        )
+        self.v_consultoria = Vertical.objects.create(
+            user=self.user, title="Consultoría", is_active=True
+        )
+        self.v_infra = Vertical.objects.create(
+            user=self.user, title="Infraestructura", is_active=True
         )
         self.url = reverse("app:transactions")
 
@@ -612,7 +635,8 @@ class TransactionModuleTests(TestCase):
             user=self.user, transaction_type="INGRESO"
         )
         self.assertEqual(tx_ingreso.client_id, norte_client.id)
-        self.assertEqual(tx_ingreso.vertical, "Consultoría")
+        self.assertEqual(tx_ingreso.vertical_id, self.v_consultoria.id)
+        self.assertEqual(tx_ingreso.vertical.title, "Consultoría")
         self.assertEqual(tx_ingreso.detail, "Cuota 1 de 6")
         self.assertEqual(tx_ingreso.currency, "ARS")
 
@@ -1004,4 +1028,463 @@ class PnLDashboardTests(TestCase):
         self.assertEqual(pnl_usd["ebitda"]["annual_total"], Decimal("3000.00"))
         self.assertEqual(pnl_usd["net_result"]["annual_total"], Decimal("3000.00"))
         self.assertEqual(pnl_usd["net_margin"]["annual_total"], Decimal("100.0"))
+
+
+class VerticalsModuleAndIntegrityTests(TestCase):
+    """
+    11. Pruebas integrales para el módulo de Verticales de Negocio e Integridad de Datos:
+        - Alta y baja lógica (is_active=False, deactivated_at) sin eliminación física.
+        - Integridad referencial (on_delete=models.PROTECT) bloqueando borrados físicos.
+        - Unicidad case-insensitive y sin tildes/espacios extra entre verticales activas.
+        - Reactivación controlada de una vertical previamente dada de baja conservando su ID.
+        - Rechazo estricto al intentar asignar una vertical inactiva por POST directo.
+        - Preservación histórica al listar, exportar o editar transacciones antiguas con vertical inactiva.
+        - Aislamiento estricto entre cuentas de usuario.
+        - Validación de verticales activas durante la importación Excel/CSV y generación de plantilla Excel.
+    """
+
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="director@empresa.com",
+            password="ContrasenaFuerte2026!",
+            is_active=True,
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email="otra_cuenta@empresa.com",
+            password="ContrasenaFuerte2026!",
+            is_active=True,
+        )
+        self.verticals_url = reverse("app:verticals")
+        self.tx_url = reverse("app:transactions")
+
+    def test_create_and_logical_deactivation_of_vertical(self):
+        self.client.force_login(self.user)
+
+        # 1. Dar de alta una vertical con espacios extra
+        res_create = self.client.post(
+            self.verticals_url,
+            {
+                "action": "create",
+                "title": "   Consultoría Estratégica   ",
+                "description": "  Asesoramiento financiero corporativo  ",
+            },
+        )
+        self.assertEqual(res_create.status_code, 201)
+        payload = res_create.json()
+        self.assertEqual(payload["status"], "ok")
+        v_id = payload["vertical"]["id"]
+        self.assertEqual(payload["vertical"]["title"], "Consultoría Estratégica")
+        self.assertEqual(
+            payload["vertical"]["description"],
+            "Asesoramiento financiero corporativo",
+        )
+        self.assertTrue(payload["vertical"]["is_active"])
+
+        # 2. Editar título y descripción en lote mediante "Guardar Cambios" (bulk_save)
+        res_bulk_edit = self.client.post(
+            self.verticals_url,
+            data=json.dumps(
+                {
+                    "action": "bulk_save",
+                    "rows": [
+                        {
+                            "id": v_id,
+                            "title": "  Consultoría Corporativa 2026  ",
+                            "description": "  Descripción modificada desde la tabla  ",
+                        }
+                    ],
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res_bulk_edit.status_code, 200)
+        v_db_updated = Vertical.objects.get(pk=v_id)
+        self.assertEqual(v_db_updated.title, "Consultoría Corporativa 2026")
+        self.assertEqual(
+            v_db_updated.description, "Descripción modificada desde la tabla"
+        )
+
+        # 3. Dar de baja lógica la vertical
+        res_deact = self.client.post(
+            self.verticals_url,
+            data=json.dumps({"action": "deactivate", "id": v_id}),
+            content_type="application/json",
+        )
+        self.assertEqual(res_deact.status_code, 200)
+        data_deact = res_deact.json()
+        self.assertEqual(data_deact["status"], "ok")
+        self.assertEqual(data_deact["deactivated_id"], v_id)
+        self.assertEqual(len(data_deact["verticals"]), 0)
+
+        # Verificar que sigue existiendo físicamente en la base de datos con is_active=False
+        v_db = Vertical.objects.get(pk=v_id)
+        self.assertFalse(v_db.is_active)
+        self.assertIsNotNone(v_db.deactivated_at)
+
+        # La interfaz GET de Verticales solo lista verticales activas
+        res_get = self.client.get(self.verticals_url)
+        self.assertEqual(res_get.status_code, 200)
+        self.assertNotContains(res_get, "Consultoría Corporativa 2026")
+
+    def test_case_insensitive_and_accent_insensitive_uniqueness_and_controlled_reactivation(
+        self,
+    ):
+        self.client.force_login(self.user)
+        v_orig = Vertical.objects.create(
+            user=self.user,
+            title="Consultoría",
+            description="Descripción inicial",
+            is_active=True,
+        )
+
+        # 1. Intentar crear duplicado activo con distintas mayúsculas, espacios o sin tilde
+        for duplicate_title in ("CONSULTORÍA", "  consultoría  ", " consultoria "):
+            res_dup = self.client.post(
+                self.verticals_url,
+                {
+                    "action": "create",
+                    "title": duplicate_title,
+                    "description": "Duplicada",
+                },
+            )
+            self.assertEqual(res_dup.status_code, 400)
+            self.assertIn(
+                "Ya existe una vertical activa con este título",
+                res_dup.json()["message"],
+            )
+
+        self.assertEqual(Vertical.objects.filter(user=self.user).count(), 1)
+
+        # 2. Dar de baja lógica la vertical y volver a darla de alta -> Reactivación controlada conservando ID
+        v_orig.deactivate()
+        self.assertFalse(v_orig.is_active)
+
+        res_reactivate = self.client.post(
+            self.verticals_url,
+            {
+                "action": "create",
+                "title": "  CONSULTORÍA ",
+                "description": "Descripción actualizada al reactivar",
+            },
+        )
+        self.assertEqual(res_reactivate.status_code, 200)
+        react_data = res_reactivate.json()
+        self.assertTrue(react_data["reactivated"])
+        self.assertEqual(react_data["vertical"]["id"], v_orig.id)
+
+        v_orig.refresh_from_db()
+        self.assertTrue(v_orig.is_active)
+        self.assertIsNone(v_orig.deactivated_at)
+        self.assertEqual(
+            v_orig.description, "Descripción actualizada al reactivar"
+        )
+        self.assertEqual(Vertical.objects.filter(user=self.user).count(), 1)
+
+    def test_on_delete_protect_prevents_physical_deletion_of_vertical_with_transactions(
+        self,
+    ):
+        v = Vertical.objects.create(
+            user=self.user, title="Academia", is_active=True
+        )
+        Transaction.objects.create(
+            user=self.user,
+            date="2026-11-10",
+            vertical=v,
+            transaction_type=Transaction.TransactionType.INCOME,
+            concept="Cuota Mensual",
+            amount=Decimal("50000.00"),
+            currency=Transaction.Currency.ARS,
+        )
+
+        # Intento de borrado físico directo desde ORM/Admin debe lanzar ProtectedError
+        with self.assertRaises(ProtectedError):
+            v.delete()
+
+        self.assertTrue(Vertical.objects.filter(pk=v.pk).exists())
+
+    def test_cannot_assign_inactive_vertical_via_direct_post_to_new_or_other_transaction(
+        self,
+    ):
+        self.client.force_login(self.user)
+        v_active = Vertical.objects.create(
+            user=self.user, title="Activa", is_active=True
+        )
+        v_inactive = Vertical.objects.create(
+            user=self.user, title="Dada de Baja", is_active=False
+        )
+
+        # 1. Intentar crear una nueva transacción asignando el ID o título de una vertical inactiva
+        res_new_by_id = self.client.post(
+            self.tx_url,
+            data=json.dumps(
+                {
+                    "action": "create",
+                    "date": "2026-11-15",
+                    "vertical": v_inactive.id,
+                    "transaction_type": "INGRESO",
+                    "concept": "Venta",
+                    "amount": "1000.00",
+                    "currency": "ARS",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res_new_by_id.status_code, 400)
+        self.assertIn("inactiva", res_new_by_id.json()["message"].lower())
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+        res_new_by_title = self.client.post(
+            self.tx_url,
+            data=json.dumps(
+                {
+                    "action": "create",
+                    "date": "2026-11-15",
+                    "vertical": "Dada de Baja",
+                    "transaction_type": "INGRESO",
+                    "concept": "Venta",
+                    "amount": "1000.00",
+                    "currency": "ARS",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res_new_by_title.status_code, 400)
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+        # 2. Crear transacción con vertical activa y luego intentar cambiarla a una vertical inactiva
+        tx = Transaction.objects.create(
+            user=self.user,
+            date="2026-11-15",
+            vertical=v_active,
+            transaction_type=Transaction.TransactionType.INCOME,
+            concept="Venta Válida",
+            amount=Decimal("2500.00"),
+            currency=Transaction.Currency.ARS,
+        )
+        res_change_to_inactive = self.client.post(
+            self.tx_url,
+            data=json.dumps(
+                {
+                    "action": "update",
+                    "id": tx.id,
+                    "date": "2026-11-15",
+                    "vertical": v_inactive.id,
+                    "transaction_type": "INGRESO",
+                    "concept": "Venta Válida",
+                    "amount": "2500.00",
+                    "currency": "ARS",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res_change_to_inactive.status_code, 400)
+        tx.refresh_from_db()
+        self.assertEqual(tx.vertical_id, v_active.id)
+
+    def test_historical_transaction_preserves_inactive_vertical_on_edit_list_and_export(
+        self,
+    ):
+        self.client.force_login(self.user)
+        v_hist = Vertical.objects.create(
+            user=self.user, title="Línea Legacy 2025", is_active=True
+        )
+        v_current = Vertical.objects.create(
+            user=self.user, title="Línea Actual 2026", is_active=True
+        )
+
+        # Crear transacción cuando la vertical estaba activa
+        tx = Transaction.objects.create(
+            user=self.user,
+            date="2025-06-10",
+            vertical=v_hist,
+            transaction_type=Transaction.TransactionType.INCOME,
+            concept="Cobro Histórico",
+            detail="Detalle original",
+            amount=Decimal("85000.00"),
+            currency=Transaction.Currency.ARS,
+        )
+
+        # Dar de baja lógica la vertical histórica
+        v_hist.deactivate()
+
+        # 1. Al renderizar la vista de Transacciones, el selector de esa fila incluye la vertical marcada como (Inactiva)
+        res_list = self.client.get(self.tx_url)
+        self.assertEqual(res_list.status_code, 200)
+        self.assertContains(res_list, "Línea Legacy 2025 (Inactiva)")
+        self.assertContains(res_list, "Línea Actual 2026")
+
+        # 2. Al editar otros campos de la transacción histórica (ej. monto o detalle) manteniendo su vertical inactiva, se guarda sin perderla
+        res_edit = self.client.post(
+            self.tx_url,
+            data=json.dumps(
+                {
+                    "action": "bulk_save",
+                    "rows": [
+                        {
+                            "id": tx.id,
+                            "date": "2025-06-10",
+                            "vertical": v_hist.id,
+                            "transaction_type": "INGRESO",
+                            "concept": "Cobro Histórico Ajustado",
+                            "client": "",
+                            "detail": "Detalle editado sin perder vertical inactiva",
+                            "amount": "90000.00",
+                            "currency": "ARS",
+                        }
+                    ],
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res_edit.status_code, 200)
+        tx.refresh_from_db()
+        self.assertEqual(tx.vertical_id, v_hist.id)
+        self.assertEqual(tx.concept, "Cobro Histórico Ajustado")
+        self.assertEqual(tx.amount, Decimal("90000.00"))
+
+        # 3. Al exportar transacciones a Excel, se preserva el nombre de la vertical histórica
+        res_export = self.client.get(reverse("app:transactions_export"))
+        self.assertEqual(res_export.status_code, 200)
+        df_export = pd.read_excel(
+            io.BytesIO(res_export.content),
+            sheet_name="Transacciones",
+            engine="openpyxl",
+        )
+        self.assertEqual(len(df_export), 1)
+        self.assertEqual(df_export.iloc[0]["Vertical"], "Línea Legacy 2025")
+        self.assertEqual(df_export.iloc[0]["Estado_Vertical"], "Inactiva")
+
+    def test_strict_user_isolation_for_verticals_and_transactions(self):
+        v_other = Vertical.objects.create(
+            user=self.other_user, title="Vertical Ajena", is_active=True
+        )
+        self.client.force_login(self.user)
+
+        # 1. No puede ver ni dar de baja la vertical de otro usuario
+        res_get = self.client.get(self.verticals_url)
+        self.assertNotContains(res_get, "Vertical Ajena")
+
+        res_deact = self.client.post(
+            self.verticals_url,
+            data=json.dumps({"action": "deactivate", "id": v_other.id}),
+            content_type="application/json",
+        )
+        self.assertEqual(res_deact.status_code, 404)
+        v_other.refresh_from_db()
+        self.assertTrue(v_other.is_active)
+
+        # 2. No puede asignar el ID de la vertical de otro usuario a una transacción propia
+        res_tx = self.client.post(
+            self.tx_url,
+            data=json.dumps(
+                {
+                    "action": "create",
+                    "date": "2026-11-20",
+                    "vertical": v_other.id,
+                    "transaction_type": "INGRESO",
+                    "concept": "Intento Cruzado",
+                    "amount": "500.00",
+                    "currency": "ARS",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res_tx.status_code, 400)
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+    def test_excel_and_csv_import_validates_active_verticals_and_template_reflects_active_verticals(
+        self,
+    ):
+        self.client.force_login(self.user)
+        v_active = Vertical.objects.create(
+            user=self.user,
+            title="Consultoría",
+            description="Unidad activa",
+            is_active=True,
+        )
+        v_inactive = Vertical.objects.create(
+            user=self.user,
+            title="Unidad Cerrada",
+            description="Dada de baja",
+            is_active=False,
+        )
+        Vertical.objects.create(
+            user=self.other_user,
+            title="Vertical Otro Usuario",
+            is_active=True,
+        )
+
+        # 1. Verificar que la plantilla Excel incluye únicamente las verticales activas del usuario
+        res_tpl = self.client.get(reverse("app:transactions_template"))
+        self.assertEqual(res_tpl.status_code, 200)
+        df_vert_sheet = pd.read_excel(
+            io.BytesIO(res_tpl.content),
+            sheet_name="Verticales_Activas",
+            engine="openpyxl",
+        )
+        active_titles = list(df_vert_sheet["Vertical"])
+        self.assertEqual(active_titles, ["Consultoría"])
+        self.assertNotIn("Unidad Cerrada", active_titles)
+        self.assertNotIn("Vertical Otro Usuario", active_titles)
+
+        # 2. Importar fila con vertical inexistente debe fallar indicando fila y motivo, sin crear verticales fantasma
+        csv_missing_vert = (
+            "Fecha,Vertical,Tipo,Concepto,Cliente,Detalle,Monto,Moneda\n"
+            "2026-11-01,Vertical Fantasma,Ingreso,Abono,Cliente A,Detalle,1000.00,ARS\n"
+        ).encode("utf-8")
+        res_missing = self.client.post(
+            self.tx_url,
+            {
+                "action": "bulk_upload",
+                "file": SimpleUploadedFile(
+                    "fantasma.csv", csv_missing_vert, content_type="text/csv"
+                ),
+            },
+        )
+        self.assertEqual(res_missing.status_code, 400)
+        msg_missing = res_missing.json()["message"]
+        self.assertIn("Fila 2", msg_missing)
+        self.assertIn("Vertical Fantasma", msg_missing)
+        self.assertFalse(
+            Vertical.objects.filter(title__iexact="Vertical Fantasma").exists()
+        )
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+        # 3. Importar fila con vertical dada de baja (is_active=False) debe ser rechazado con error descriptivo
+        csv_inactive_vert = (
+            "Fecha,Vertical,Tipo,Concepto,Cliente,Detalle,Monto,Moneda\n"
+            "2026-11-01,  UNIDAD CERRADA ,Ingreso,Abono,Cliente A,Detalle,1000.00,ARS\n"
+        ).encode("utf-8")
+        res_inact = self.client.post(
+            self.tx_url,
+            {
+                "action": "bulk_upload",
+                "file": SimpleUploadedFile(
+                    "inactiva.csv", csv_inactive_vert, content_type="text/csv"
+                ),
+            },
+        )
+        self.assertEqual(res_inact.status_code, 400)
+        msg_inact = res_inact.json()["message"]
+        self.assertIn("Fila 2", msg_inact)
+        self.assertIn("dada de baja", msg_inact.lower())
+        self.assertEqual(Transaction.objects.filter(user=self.user).count(), 0)
+
+        # 4. Importar fila con vertical activa (comparación case-insensitive y sin espacios sobrantes) tiene éxito
+        csv_valid_vert = (
+            "Fecha,Vertical,Tipo,Concepto,Cliente,Detalle,Monto,Moneda\n"
+            "2026-11-01,  consultoria  ,Ingreso,Abono,Cliente A,Detalle,1000.00,ARS\n"
+        ).encode("utf-8")
+        res_valid = self.client.post(
+            self.tx_url,
+            {
+                "action": "bulk_upload",
+                "file": SimpleUploadedFile(
+                    "valida.csv", csv_valid_vert, content_type="text/csv"
+                ),
+            },
+        )
+        self.assertEqual(res_valid.status_code, 200)
+        tx_created = Transaction.objects.get(user=self.user)
+        self.assertEqual(tx_created.vertical_id, v_active.id)
 
