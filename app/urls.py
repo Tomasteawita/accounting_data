@@ -15,11 +15,31 @@ urlpatterns = [
     path("clientes/crear/", views.client_create_view, name="client_create"),
     path("clientes/<int:pk>/editar/", views.client_update_view, name="client_update"),
     path("clientes/<int:pk>/eliminar/", views.client_delete_view, name="client_delete"),
+    path(
+        "clientes/exportar/",
+        views.clients_export_view,
+        name="clients_export",
+    ),
+    path(
+        "clientes/plantilla/",
+        views.clients_template_view,
+        name="clients_template",
+    ),
     path("verticales/", views.verticals_view, name="verticals"),
     path(
         "verticales/<int:pk>/baja/",
         views.vertical_deactivate_view,
         name="vertical_deactivate",
+    ),
+    path(
+        "verticales/exportar/",
+        views.verticals_export_view,
+        name="verticals_export",
+    ),
+    path(
+        "verticales/plantilla/",
+        views.verticals_template_view,
+        name="verticals_template",
     ),
     path("transacciones/", views.transactions_view, name="transactions"),
     path(

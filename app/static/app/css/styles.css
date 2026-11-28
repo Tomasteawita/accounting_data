@@ -1835,10 +1835,12 @@ tr.pnl-section-header-row.is-collapsed {
     .tx-upload-controls {
         flex-direction: row;
         align-items: center;
+        flex-wrap: wrap;
     }
 
     .tx-upload-controls .file-input-stoic {
         flex: 1;
+        min-width: 220px;
     }
 
     .tx-upload-btn,

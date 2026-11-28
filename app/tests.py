@@ -1014,6 +1014,127 @@ class ClienteModuleTests(TestCase):
             Cliente.objects.filter(nombre_completo="Cliente PDF Excedido").exists()
         )
 
+    def test_clients_download_template_xlsx_and_reimport_roundtrip(self):
+        """
+        Verifica que 'Descargar Plantilla' en Clientes devuelve un archivo .xlsx válido
+        con las 4 cabeceras esperadas y que sus filas guía pueden importarse mediante bulk_upload.
+        """
+        self.client.force_login(self.user)
+        template_url = reverse("app:clients_template")
+
+        response = self.client.get(template_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertIn(
+            'attachment; filename="plantilla_clientes.xlsx"',
+            response["Content-Disposition"],
+        )
+
+        df = pd.read_excel(io.BytesIO(response.content), dtype=str, keep_default_na=False)
+        self.assertEqual(
+            list(df.columns),
+            ["Nombre Completo", "Email", "Teléfono", "Sexo"],
+        )
+        self.assertEqual(len(df), 2)
+
+        uploaded_template = SimpleUploadedFile(
+            "plantilla_clientes.xlsx",
+            response.content,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        res_import = self.client.post(
+            self.url,
+            {"action": "bulk_upload", "file": uploaded_template},
+        )
+        self.assertEqual(res_import.status_code, 200)
+        payload = res_import.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["imported_count"], 2)
+        self.assertEqual(Cliente.objects.filter(user=self.user).count(), 2)
+
+    def test_clients_csv_import_export_user_isolation_and_roundtrip(self):
+        """
+        Verifica la importación CSV de clientes en memoria, la exportación a Excel (.xlsx),
+        el aislamiento entre usuarios y el round-trip completo.
+        """
+        other_user = CustomUser.objects.create_user(
+            email="otro_clientes@empresa.com",
+            password="ContrasenaFuerte2026!",
+            is_active=True,
+        )
+        Cliente.objects.create(
+            user=other_user,
+            nombre_completo="Cliente Ajeno S.A.",
+            email="ajeno@empresa.com",
+        )
+
+        self.client.force_login(self.user)
+        export_url = reverse("app:clients_export")
+
+        # Exportar sin clientes devuelve 404 en petición AJAX
+        res_empty = self.client.get(
+            export_url, HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        self.assertEqual(res_empty.status_code, 404)
+
+        # Importar CSV de clientes en memoria
+        csv_content = (
+            "Nombre Completo,Email,Teléfono,Sexo\n"
+            "Estudio Contable Sur,CONTACTO@estudiosur.com,+54 9 11 1111-2222,Otro\n"
+            "Lucía Fernández,lucia@fernandez.com,11 3333-4444,Femenino\n"
+        ).encode("utf-8")
+        res_csv = self.client.post(
+            self.url,
+            {
+                "action": "bulk_upload",
+                "file": SimpleUploadedFile(
+                    "clientes.csv", csv_content, content_type="text/csv"
+                ),
+            },
+        )
+        self.assertEqual(res_csv.status_code, 200)
+        self.assertEqual(res_csv.json()["imported_count"], 2)
+
+        # Exportar a Excel
+        res_export = self.client.get(export_url)
+        self.assertEqual(res_export.status_code, 200)
+        self.assertIn(
+            'attachment; filename="clientes_exportados.xlsx"',
+            res_export["Content-Disposition"],
+        )
+
+        df_exp = pd.read_excel(
+            io.BytesIO(res_export.content), dtype=str, keep_default_na=False
+        )
+        self.assertEqual(len(df_exp), 2)
+        self.assertEqual(df_exp.iloc[0]["Nombre Completo"], "Estudio Contable Sur")
+        self.assertEqual(df_exp.iloc[0]["Email"], "contacto@estudiosur.com")
+        self.assertEqual(df_exp.iloc[1]["Nombre Completo"], "Lucía Fernández")
+        self.assertEqual(df_exp.iloc[1]["Sexo"], "F")
+
+        # Round-trip: eliminar clientes del usuario y reimportar el Excel exportado
+        Cliente.objects.filter(user=self.user).delete()
+        self.assertEqual(Cliente.objects.filter(user=self.user).count(), 0)
+
+        res_reimport = self.client.post(
+            self.url,
+            {
+                "action": "bulk_upload",
+                "file": SimpleUploadedFile(
+                    "clientes_exportados.xlsx",
+                    res_export.content,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ),
+            },
+        )
+        self.assertEqual(res_reimport.status_code, 200)
+        self.assertEqual(res_reimport.json()["imported_count"], 2)
+        self.assertEqual(Cliente.objects.filter(user=self.user).count(), 2)
+
+
 
 class PnLDashboardTests(TestCase):
     """
@@ -1703,4 +1824,127 @@ class VerticalsModuleAndIntegrityTests(TestCase):
         self.assertEqual(res_valid.status_code, 200)
         tx_created = Transaction.objects.get(user=self.user)
         self.assertEqual(tx_created.vertical_id, v_active.id)
+
+    def test_verticals_download_template_csv_import_export_and_reactivation_roundtrip(
+        self,
+    ):
+        """
+        Verifica en el módulo de Verticales:
+        1. Descarga de plantilla Excel (.xlsx) e importación directa (round-trip).
+        2. Importación CSV en memoria y rechazo de títulos duplicados activos.
+        3. Exportación a Excel (.xlsx) de verticales activas (aislada por usuario).
+        4. Reimportación del archivo exportado tras baja lógica (reactivación controlada conservando ID).
+        """
+        self.client.force_login(self.user)
+        template_url = reverse("app:verticals_template")
+        export_url = reverse("app:verticals_export")
+
+        # 0. Exportar sin verticales activas devuelve 404 en petición AJAX
+        res_empty = self.client.get(
+            export_url, HTTP_X_REQUESTED_WITH="XMLHttpRequest"
+        )
+        self.assertEqual(res_empty.status_code, 404)
+
+        # 1. Descargar plantilla de verticales y reimportarla
+        res_tpl = self.client.get(template_url)
+        self.assertEqual(res_tpl.status_code, 200)
+        self.assertEqual(
+            res_tpl["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertIn(
+            'attachment; filename="plantilla_verticales.xlsx"',
+            res_tpl["Content-Disposition"],
+        )
+
+        df_tpl = pd.read_excel(
+            io.BytesIO(res_tpl.content), dtype=str, keep_default_na=False
+        )
+        self.assertEqual(list(df_tpl.columns), ["Título", "Descripción"])
+        self.assertEqual(len(df_tpl), 2)
+
+        res_import_tpl = self.client.post(
+            self.verticals_url,
+            {
+                "action": "bulk_upload",
+                "file": SimpleUploadedFile(
+                    "plantilla_verticales.xlsx",
+                    res_tpl.content,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ),
+            },
+        )
+        self.assertEqual(res_import_tpl.status_code, 200)
+        self.assertEqual(res_import_tpl.json()["imported_count"], 2)
+        self.assertEqual(
+            Vertical.objects.filter(user=self.user, is_active=True).count(), 2
+        )
+
+        # 2. Importar CSV adicional con una vertical nueva
+        csv_content = (
+            "Título,Descripción\n"
+            "Academia Corporativa,Formación ejecutiva\n"
+        ).encode("utf-8")
+        res_csv = self.client.post(
+            self.verticals_url,
+            {
+                "action": "bulk_upload",
+                "file": SimpleUploadedFile(
+                    "verticales.csv", csv_content, content_type="text/csv"
+                ),
+            },
+        )
+        self.assertEqual(res_csv.status_code, 200)
+        self.assertEqual(res_csv.json()["imported_count"], 1)
+        self.assertEqual(
+            Vertical.objects.filter(user=self.user, is_active=True).count(), 3
+        )
+
+        # 3. Exportar verticales activas a Excel
+        Vertical.objects.create(
+            user=self.other_user, title="Vertical Ajena", is_active=True
+        )
+        res_export = self.client.get(export_url)
+        self.assertEqual(res_export.status_code, 200)
+        self.assertIn(
+            'attachment; filename="verticales_exportadas.xlsx"',
+            res_export["Content-Disposition"],
+        )
+        df_exp = pd.read_excel(
+            io.BytesIO(res_export.content), dtype=str, keep_default_na=False
+        )
+        self.assertEqual(len(df_exp), 3)
+
+        # 4. Dar de baja lógica todas las verticales del usuario y reimportar el Excel exportado
+        original_ids = set(
+            Vertical.objects.filter(user=self.user, is_active=True).values_list(
+                "id", flat=True
+            )
+        )
+        for v in Vertical.objects.filter(user=self.user, is_active=True):
+            v.deactivate()
+        self.assertEqual(
+            Vertical.objects.filter(user=self.user, is_active=True).count(), 0
+        )
+
+        res_reimport = self.client.post(
+            self.verticals_url,
+            {
+                "action": "bulk_upload",
+                "file": SimpleUploadedFile(
+                    "verticales_exportadas.xlsx",
+                    res_export.content,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ),
+            },
+        )
+        self.assertEqual(res_reimport.status_code, 200)
+        self.assertEqual(res_reimport.json()["imported_count"], 3)
+        reactivated_ids = set(
+            Vertical.objects.filter(user=self.user, is_active=True).values_list(
+                "id", flat=True
+            )
+        )
+        self.assertEqual(original_ids, reactivated_ids)
+
 

@@ -51,6 +51,32 @@
         </form>
     </section>
 
+    <!-- Panel de Ingesta Masiva en Memoria (CSV / Excel) y Exportación -->
+    <section class="tx-upload-panel" aria-label="Ingesta masiva y exportación de verticales">
+        <div class="tx-upload-info">
+            <h2 class="tx-panel-heading">Ingesta Masiva en Memoria (CSV / Excel)</h2>
+            <p class="tx-panel-help">
+                Estructura de columnas: <code>Título</code> (obligatorio, único entre verticales activas) y <code>Descripción</code>. Límite: 5 MB en RAM.
+            </p>
+        </div>
+        <form id="vertical-bulk-upload-form" class="tx-upload-form" method="post" action="{% url 'app:verticals' %}" enctype="multipart/form-data" novalidate>
+            {% csrf_token %}
+            <input type="hidden" name="action" value="bulk_upload">
+            <div class="tx-upload-controls">
+                {{ upload_form.file }}
+                <button type="submit" id="btn-vertical-upload-submit" class="btn-secondary tx-upload-btn">
+                    Importar Archivo
+                </button>
+                <a href="{% url 'app:verticals_template' %}" id="btn-vertical-download-template" class="btn-outline tx-template-btn">
+                    Descargar Plantilla
+                </a>
+                <a href="{% url 'app:verticals_export' %}" id="btn-vertical-export-data" class="btn-secondary tx-export-btn">
+                    Exportar Datos
+                </a>
+            </div>
+        </form>
+    </section>
+
     <!-- Barra de Herramientas de la Hoja de Verticales (igual que en Transacciones) -->
     <div class="sheet-toolbar" role="toolbar" aria-label="Controles de edición de verticales">
         <div class="sheet-toolbar-left">
@@ -211,6 +237,9 @@
     var tbody = document.getElementById("verticals-tbody");
     var saveAllBtn = document.getElementById("btn-verticals-save-all");
     var dirtyIndicator = document.getElementById("verticals-dirty-indicator");
+    var uploadForm = document.getElementById("vertical-bulk-upload-form");
+    var uploadBtn = document.getElementById("btn-vertical-upload-submit");
+    var exportBtn = document.getElementById("btn-vertical-export-data");
 
     var paginationNav = document.querySelector(".sheet-pagination");
     var perPageSelect = document.getElementById("verticals-per-page-select");
@@ -621,6 +650,107 @@
             .catch(function () {
                 saveAllBtn.disabled = false;
                 showBanner("Error de conexión al guardar los cambios.", true);
+            });
+        });
+    }
+
+    // 3.5 Ingesta masiva en memoria de verticales (CSV / Excel vía Fetch API)
+    if (uploadForm) {
+        uploadForm.addEventListener("submit", function (event) {
+            event.preventDefault();
+            var fileInput = uploadForm.querySelector("input[type='file']");
+            if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+                showBanner("Seleccione un archivo .csv o .xlsx antes de importar.", true);
+                return;
+            }
+
+            var formData = new FormData(uploadForm);
+            formData.set("action", "bulk_upload");
+            formData.set("page", "1");
+            formData.set("per_page", String(currentPerPage));
+            if (uploadBtn) uploadBtn.disabled = true;
+
+            fetch(endpoint, {
+                method: "POST",
+                headers: {
+                    "X-CSRFToken": csrfToken,
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Accept": "application/json"
+                },
+                body: formData
+            })
+            .then(function (res) {
+                return res.json().then(function (data) {
+                    return { ok: res.ok, data: data };
+                });
+            })
+            .then(function (result) {
+                if (uploadBtn) uploadBtn.disabled = false;
+                if (!result.ok || result.data.status !== "ok") {
+                    showBanner(result.data.message || "Error al procesar el archivo.", true);
+                    return;
+                }
+                uploadForm.reset();
+                if (Array.isArray(result.data.verticals)) {
+                    renderVerticalsTable(result.data.verticals);
+                }
+                if (result.data.pagination) {
+                    updatePaginationUI(result.data.pagination);
+                }
+                showBanner(result.data.message, false);
+            })
+            .catch(function () {
+                if (uploadBtn) uploadBtn.disabled = false;
+                showBanner("Error de red durante la carga del archivo.", true);
+            });
+        });
+    }
+
+    // 3.6 Exportación de verticales en Excel en memoria vía Fetch API
+    if (exportBtn) {
+        exportBtn.addEventListener("click", function (event) {
+            event.preventDefault();
+            var exportUrl = exportBtn.getAttribute("href") || "{% url 'app:verticals_export' %}";
+            exportBtn.classList.add("is-disabled");
+
+            fetch(exportUrl, {
+                method: "GET",
+                headers: {
+                    "X-Requested-With": "XMLHttpRequest"
+                }
+            })
+            .then(function (res) {
+                var contentType = res.headers.get("Content-Type") || "";
+                if (!res.ok || contentType.indexOf("application/json") !== -1) {
+                    return res.json().then(function (errData) {
+                        throw new Error(errData.message || "Error al exportar las verticales.");
+                    });
+                }
+                var disposition = res.headers.get("Content-Disposition") || "";
+                var filename = "verticales_exportadas.xlsx";
+                var match = disposition.match(/filename="?([^";]+)"?/i);
+                if (match && match[1]) {
+                    filename = match[1];
+                }
+                return res.blob().then(function (blob) {
+                    return { blob: blob, filename: filename };
+                });
+            })
+            .then(function (fileResult) {
+                exportBtn.classList.remove("is-disabled");
+                var downloadUrl = window.URL.createObjectURL(fileResult.blob);
+                var link = document.createElement("a");
+                link.href = downloadUrl;
+                link.download = fileResult.filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                window.URL.revokeObjectURL(downloadUrl);
+                showBanner("Exportación completada: archivo de verticales descargado correctamente.", false);
+            })
+            .catch(function (err) {
+                exportBtn.classList.remove("is-disabled");
+                showBanner(err.message || "Error de red al exportar las verticales.", true);
             });
         });
     }
