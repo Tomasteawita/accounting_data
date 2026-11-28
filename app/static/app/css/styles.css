@@ -813,6 +813,44 @@ body {
     background-color: var(--bg-primary);
 }
 
+/* Subpanel de Exportación por Rango de Fechas */
+.tx-export-form {
+    border-top: 1px solid var(--border-tech);
+    padding-top: 1rem;
+    margin-top: 0.25rem;
+}
+
+.tx-export-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.tx-export-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.tx-export-label {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-primary);
+}
+
+.tx-export-date-input {
+    min-height: 44px;
+    background-color: var(--bg-primary);
+}
+
+.tx-export-actions {
+    display: flex;
+    flex-direction: column;
+}
+
 /* Barra de Herramientas de la Hoja de Cálculo */
 .sheet-toolbar {
     display: flex;
@@ -1163,6 +1201,48 @@ body {
     width: 14px;
     height: 14px;
     flex-shrink: 0;
+}
+
+/* ==========================================================================
+   8.5 Módulo de Verticales — Formulario de Alta y Tabla con Baja Lógica
+   ========================================================================== */
+.vertical-form-fields {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.875rem;
+}
+
+.verticals-sheet-table {
+    min-width: 680px;
+}
+
+.col-vertical-id {
+    width: 90px;
+}
+
+.col-vertical-title {
+    min-width: 220px;
+}
+
+.col-vertical-desc {
+    min-width: 260px;
+}
+
+.tx-template-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.625rem;
+    margin-top: 0.5rem;
+}
+
+.tx-template-links .btn-row-action {
+    flex: 0 0 auto;
+    width: auto;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.375rem 0.75rem;
 }
 
 /* ==========================================================================
@@ -1755,15 +1835,30 @@ tr.pnl-section-header-row.is-collapsed {
     .tx-upload-controls {
         flex-direction: row;
         align-items: center;
+        flex-wrap: wrap;
     }
 
     .tx-upload-controls .file-input-stoic {
         flex: 1;
+        min-width: 220px;
     }
 
-    .tx-upload-btn {
+    .tx-upload-btn,
+    .tx-template-btn,
+    .tx-export-btn {
         width: auto;
         min-width: 190px;
+    }
+
+    .tx-export-controls {
+        flex-direction: row;
+        align-items: flex-end;
+        flex-wrap: wrap;
+    }
+
+    .tx-export-field {
+        flex: 1;
+        min-width: 180px;
     }
 
     .sheet-toolbar {
@@ -1806,6 +1901,10 @@ tr.pnl-section-header-row.is-collapsed {
     .client-cancel-btn {
         width: auto;
         min-width: 180px;
+    }
+
+    .vertical-form-fields {
+        grid-template-columns: 1fr 2fr;
     }
 }
 

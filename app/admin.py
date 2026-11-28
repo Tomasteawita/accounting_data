@@ -7,7 +7,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
 from .forms import CustomUserChangeForm, CustomUserCreationForm
-from .models import Cliente, CustomUser, Transaction
+from .models import Cliente, CustomUser, Transaction, Vertical
 
 
 @admin.register(CustomUser)
@@ -65,6 +65,14 @@ class ClienteAdmin(admin.ModelAdmin):
     list_filter = ("sexo", "created_at")
 
 
+@admin.register(Vertical)
+class VerticalAdmin(admin.ModelAdmin):
+    list_display = ("id", "title", "user", "is_active", "deactivated_at", "created_at")
+    list_filter = ("is_active", "created_at")
+    search_fields = ("title", "description", "user__email")
+    ordering = ("-is_active", "title")
+
+
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
     list_display = (
@@ -79,5 +87,5 @@ class TransactionAdmin(admin.ModelAdmin):
         "user",
     )
     list_filter = ("transaction_type", "currency", "vertical", "date")
-    search_fields = ("concept", "detail", "vertical", "client__nombre_completo", "user__email")
+    search_fields = ("concept", "detail", "vertical__title", "client__nombre_completo", "user__email")
     ordering = ("-date", "-id")

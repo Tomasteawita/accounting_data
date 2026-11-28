@@ -69,6 +69,32 @@
         </form>
     </section>
 
+    <!-- Panel de Ingesta Masiva en Memoria (CSV / Excel) y Exportación -->
+    <section class="tx-upload-panel" aria-label="Ingesta masiva y exportación de clientes">
+        <div class="tx-upload-info">
+            <h2 class="tx-panel-heading">Ingesta Masiva en Memoria (CSV / Excel)</h2>
+            <p class="tx-panel-help">
+                Estructura de columnas: <code>Nombre Completo</code> (obligatorio), <code>Email</code>, <code>Teléfono</code> y <code>Sexo</code> (M/F/Otro). Límite: 5 MB en RAM.
+            </p>
+        </div>
+        <form id="client-bulk-upload-form" class="tx-upload-form" method="post" action="{% url 'app:clients' %}" enctype="multipart/form-data" novalidate>
+            {% csrf_token %}
+            <input type="hidden" name="action" value="bulk_upload">
+            <div class="tx-upload-controls">
+                {{ upload_form.file }}
+                <button type="submit" id="btn-client-upload-submit" class="btn-secondary tx-upload-btn">
+                    Importar Archivo
+                </button>
+                <a href="{% url 'app:clients_template' %}" id="btn-client-download-template" class="btn-outline tx-template-btn">
+                    Descargar Plantilla
+                </a>
+                <a href="{% url 'app:clients_export' %}" id="btn-client-export-data" class="btn-secondary tx-export-btn">
+                    Exportar Datos
+                </a>
+            </div>
+        </form>
+    </section>
+
     <!-- Input de archivo oculto para el botón rápido "Subir PDF" en la tabla -->
     <input type="file" id="quick-pdf-input" class="tx-hidden-form" accept=".pdf,application/pdf">
 
@@ -221,6 +247,9 @@
     var tbody = document.getElementById("clients-tbody");
     var quickPdfInput = document.getElementById("quick-pdf-input");
     var quickUploadTargetId = null;
+    var uploadForm = document.getElementById("client-bulk-upload-form");
+    var uploadBtn = document.getElementById("btn-client-upload-submit");
+    var exportBtn = document.getElementById("btn-client-export-data");
 
     var paginationNav = document.querySelector(".sheet-pagination");
     var perPageSelect = document.getElementById("clients-per-page-select");
@@ -639,6 +668,107 @@
             .catch(function () {
                 quickPdfInput.value = "";
                 showBanner("Error de red al subir el archivo PDF.", true);
+            });
+        });
+    }
+
+    // Ingesta masiva en memoria de clientes (CSV / Excel vía Fetch API)
+    if (uploadForm) {
+        uploadForm.addEventListener("submit", function (event) {
+            event.preventDefault();
+            var fileInput = uploadForm.querySelector("input[type='file']");
+            if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+                showBanner("Seleccione un archivo .csv o .xlsx antes de importar.", true);
+                return;
+            }
+
+            var formData = new FormData(uploadForm);
+            formData.set("action", "bulk_upload");
+            formData.set("page", "1");
+            formData.set("per_page", String(currentPerPage));
+            if (uploadBtn) uploadBtn.disabled = true;
+
+            fetch(endpoint, {
+                method: "POST",
+                headers: {
+                    "X-CSRFToken": csrfToken,
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Accept": "application/json"
+                },
+                body: formData
+            })
+            .then(function (res) {
+                return res.json().then(function (data) {
+                    return { ok: res.ok, data: data };
+                });
+            })
+            .then(function (result) {
+                if (uploadBtn) uploadBtn.disabled = false;
+                if (!result.ok || result.data.status !== "ok") {
+                    showBanner(result.data.message || "Error al procesar el archivo.", true);
+                    return;
+                }
+                uploadForm.reset();
+                if (Array.isArray(result.data.clientes)) {
+                    renderClientsTable(result.data.clientes);
+                }
+                if (result.data.pagination) {
+                    updatePaginationUI(result.data.pagination);
+                }
+                showBanner(result.data.message, false);
+            })
+            .catch(function () {
+                if (uploadBtn) uploadBtn.disabled = false;
+                showBanner("Error de red durante la carga del archivo.", true);
+            });
+        });
+    }
+
+    // Exportación de clientes en Excel en memoria vía Fetch API
+    if (exportBtn) {
+        exportBtn.addEventListener("click", function (event) {
+            event.preventDefault();
+            var exportUrl = exportBtn.getAttribute("href") || "{% url 'app:clients_export' %}";
+            exportBtn.classList.add("is-disabled");
+
+            fetch(exportUrl, {
+                method: "GET",
+                headers: {
+                    "X-Requested-With": "XMLHttpRequest"
+                }
+            })
+            .then(function (res) {
+                var contentType = res.headers.get("Content-Type") || "";
+                if (!res.ok || contentType.indexOf("application/json") !== -1) {
+                    return res.json().then(function (errData) {
+                        throw new Error(errData.message || "Error al exportar los clientes.");
+                    });
+                }
+                var disposition = res.headers.get("Content-Disposition") || "";
+                var filename = "clientes_exportados.xlsx";
+                var match = disposition.match(/filename="?([^";]+)"?/i);
+                if (match && match[1]) {
+                    filename = match[1];
+                }
+                return res.blob().then(function (blob) {
+                    return { blob: blob, filename: filename };
+                });
+            })
+            .then(function (fileResult) {
+                exportBtn.classList.remove("is-disabled");
+                var downloadUrl = window.URL.createObjectURL(fileResult.blob);
+                var link = document.createElement("a");
+                link.href = downloadUrl;
+                link.download = fileResult.filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                window.URL.revokeObjectURL(downloadUrl);
+                showBanner("Exportación completada: archivo de clientes descargado correctamente.", false);
+            })
+            .catch(function (err) {
+                exportBtn.classList.remove("is-disabled");
+                showBanner(err.message || "Error de red al exportar los clientes.", true);
             });
         });
     }

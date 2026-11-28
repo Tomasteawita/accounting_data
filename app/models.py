@@ -1,15 +1,20 @@
 """
 Modelos de datos para la aplicación app.
-Define el modelo de usuario personalizado (CustomUser), el modelo base de Cliente (Client)
-y el libro de Transacciones financieras (Transaction).
+Define el modelo de usuario personalizado (CustomUser), el modelo base de Cliente (Client),
+el catálogo de Verticales de negocio (Vertical) con baja lógica y el libro de Transacciones
+financieras (Transaction).
 """
 
 from decimal import Decimal
+import unicodedata
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator, MinValueValidator
 from django.db import models
+from django.db.models import Q
+from django.db.models.functions import Lower
+from django.utils import timezone
 
 MAX_PDF_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB (10.485.760 bytes)
 
@@ -201,11 +206,103 @@ class Cliente(models.Model):
 Client = Cliente
 
 
+def normalize_vertical_title_key(value):
+    """
+    Normaliza un título de vertical para comparaciones de unicidad:
+    convierte a minúsculas, colapsa espacios extra y elimina diacríticos/tildes.
+    """
+    text = " ".join(str(value or "").strip().lower().split())
+    return "".join(
+        ch
+        for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
+
+
+class Vertical(models.Model):
+    """
+    Modelo de Vertical de negocio perteneciente a un usuario.
+    Implementa baja lógica (is_active / deactivated_at) para preservar
+    la integridad histórica de las transacciones asociadas.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="verticals",
+        verbose_name="usuario",
+    )
+    title = models.CharField("título", max_length=120)
+    description = models.TextField("descripción", blank=True, default="")
+    is_active = models.BooleanField("activa", default=True, db_index=True)
+    deactivated_at = models.DateTimeField(
+        "fecha de baja", null=True, blank=True
+    )
+    created_at = models.DateTimeField("fecha de creación", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "vertical"
+        verbose_name_plural = "verticales"
+        ordering = ["title", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                Lower("title"),
+                "user",
+                condition=Q(is_active=True),
+                name="unique_active_vertical_title_per_user",
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+        self.title = " ".join((self.title or "").strip().split())
+        self.description = (self.description or "").strip()
+        if not self.title:
+            raise ValidationError(
+                {"title": "El título de la vertical es obligatorio."}
+            )
+
+        if self.is_active and self.user_id:
+            target_key = normalize_vertical_title_key(self.title)
+            active_qs = Vertical.objects.filter(
+                user_id=self.user_id, is_active=True
+            )
+            if self.pk:
+                active_qs = active_qs.exclude(pk=self.pk)
+            for existing in active_qs:
+                if (
+                    existing.title.strip().lower() == self.title.lower()
+                    or normalize_vertical_title_key(existing.title)
+                    == target_key
+                ):
+                    raise ValidationError(
+                        {
+                            "title": "Ya existe una vertical activa con este título."
+                        }
+                    )
+
+    def save(self, *args, **kwargs):
+        self.title = " ".join((self.title or "").strip().split())
+        self.description = (self.description or "").strip()
+        super().save(*args, **kwargs)
+
+    def deactivate(self):
+        """Realiza la baja lógica de la vertical sin eliminarla físicamente."""
+        self.is_active = False
+        self.deactivated_at = timezone.now()
+        self.save(update_fields=["is_active", "deactivated_at"])
+
+    def __str__(self):
+        if not self.is_active:
+            return f"{self.title} (Inactiva)"
+        return self.title
+
+
 class Transaction(models.Model):
     """
     Registro contable de flujo de caja (Ingreso o Gasto) perteneciente a un usuario.
     Estructura contable de 8 campos operativos:
-    Fecha, Vertical, Tipo, Concepto, Cliente (FK), Detalle, Monto y Moneda (ARS/USD).
+    Fecha, Vertical (FK PROTECT), Tipo, Concepto, Cliente (FK), Detalle, Monto y Moneda (ARS/USD).
     """
 
     class TransactionType(models.TextChoices):
@@ -223,8 +320,13 @@ class Transaction(models.Model):
         verbose_name="usuario",
     )
     date = models.DateField("fecha", db_index=True)
-    vertical = models.CharField(
-        "vertical", max_length=120, blank=True, default="", db_index=True
+    vertical = models.ForeignKey(
+        Vertical,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="transactions",
+        verbose_name="vertical",
     )
     transaction_type = models.CharField(
         "tipo",
@@ -272,6 +374,58 @@ class Transaction(models.Model):
                 fields=["user", "currency"], name="idx_tx_user_currency"
             ),
         ]
+
+    def __init__(self, *args, **kwargs):
+        raw_vertical = kwargs.get("vertical", None)
+        if isinstance(raw_vertical, str):
+            raw_str = raw_vertical.strip()
+            if not raw_str:
+                kwargs["vertical"] = None
+            else:
+                user_obj = kwargs.get("user")
+                user_id = kwargs.get("user_id") or getattr(user_obj, "id", None)
+                if user_id:
+                    vert = Vertical.objects.filter(
+                        user_id=user_id, title__iexact=raw_str
+                    ).order_by("-is_active", "-id").first()
+                    if vert is None:
+                        vert = Vertical.objects.create(
+                            user_id=user_id, title=raw_str, is_active=True
+                        )
+                    kwargs["vertical"] = vert
+                else:
+                    kwargs["vertical"] = None
+        super().__init__(*args, **kwargs)
+
+    @property
+    def vertical_title(self):
+        return self.vertical.title if self.vertical_id and self.vertical else ""
+
+    def clean(self):
+        super().clean()
+        if self.vertical_id is not None and self.vertical is not None:
+            if self.user_id and self.vertical.user_id != self.user_id:
+                raise ValidationError(
+                    {
+                        "vertical": "La vertical seleccionada no pertenece a su cuenta."
+                    }
+                )
+            if not self.vertical.is_active:
+                allow_historical = False
+                if self.pk:
+                    original_vertical_id = (
+                        Transaction.objects.filter(pk=self.pk)
+                        .values_list("vertical_id", flat=True)
+                        .first()
+                    )
+                    if original_vertical_id == self.vertical_id:
+                        allow_historical = True
+                if not allow_historical:
+                    raise ValidationError(
+                        {
+                            "vertical": "No se puede asignar una vertical dada de baja (inactiva) a la transacción."
+                        }
+                    )
 
     def save(self, *args, **kwargs):
         if self.transaction_type == "EGRESO":

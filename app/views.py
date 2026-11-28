@@ -30,7 +30,7 @@ from django.core.paginator import Paginator
 from django.db import transaction as db_transaction
 from django.db.models import Sum
 from django.db.models.functions import ExtractMonth, ExtractYear
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse_lazy
 from django.utils.encoding import force_str
@@ -38,6 +38,7 @@ from django.utils.http import urlsafe_base64_decode
 from django.views.decorators.http import require_http_methods
 
 from .forms import (
+    ClienteBulkUploadForm,
     ClienteForm,
     CustomAuthenticationForm,
     CustomPasswordResetForm,
@@ -46,8 +47,16 @@ from .forms import (
     ResendActivationForm,
     TransactionBulkUploadForm,
     TransactionForm,
+    VerticalBulkUploadForm,
+    VerticalForm,
 )
-from .models import Client, Cliente, Transaction
+from .models import (
+    Client,
+    Cliente,
+    Transaction,
+    Vertical,
+    normalize_vertical_title_key,
+)
 from .utils import send_activation_email
 
 CustomUser = get_user_model()
@@ -361,10 +370,10 @@ def dashboard_view(request):
         available_years = [current_year]
 
     raw_verticals = list(
-        user_tx_qs.exclude(vertical="")
-        .values_list("vertical", flat=True)
+        user_tx_qs.filter(vertical__isnull=False)
+        .values_list("vertical__title", flat=True)
         .distinct()
-        .order_by("vertical")
+        .order_by("vertical__title")
     )
     available_verticals = [v for v in raw_verticals if v]
 
@@ -400,7 +409,10 @@ def dashboard_view(request):
         currency=selected_currency,
     )
     if selected_vertical:
-        pnl_qs = pnl_qs.filter(vertical=selected_vertical)
+        if selected_vertical.isdigit():
+            pnl_qs = pnl_qs.filter(vertical_id=int(selected_vertical))
+        else:
+            pnl_qs = pnl_qs.filter(vertical__title__iexact=selected_vertical)
 
     monthly_aggregates = (
         pnl_qs.annotate(month=ExtractMonth("date"))
@@ -503,14 +515,293 @@ def _paginate_user_clientes(user, page=1, per_page=DEFAULT_PAGE_SIZE):
     return page_obj, pagination_meta
 
 
+XLSX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+CLIENT_SPREADSHEET_COLUMNS = [
+    "Nombre Completo",
+    "Email",
+    "Teléfono",
+    "Sexo",
+]
+
+VERTICAL_SPREADSHEET_COLUMNS = [
+    "Título",
+    "Descripción",
+]
+
+
+def _build_simple_excel_bytes(rows_data, columns, sheet_name="Datos"):
+    """
+    Construye un archivo Excel (.xlsx) estrictamente en memoria (io.BytesIO + pandas/openpyxl)
+    con las columnas indicadas y libera inmediatamente el DataFrame y el buffer de RAM.
+    """
+    buffer = io.BytesIO()
+    df = pd.DataFrame(rows_data, columns=list(columns))
+    try:
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+        return buffer.getvalue()
+    finally:
+        del df
+        buffer.close()
+        del buffer
+        gc.collect()
+
+
+def _module_export_error_response(request, message, redirect_to, status=400):
+    """
+    Devuelve una respuesta de error de validación en JSON cuando la petición proviene
+    de Fetch API / AJAX, o redirige al módulo correspondiente con un mensaje en caso contrario.
+    """
+    is_ajax = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in request.headers.get("Accept", "")
+    )
+    if is_ajax:
+        return JsonResponse({"status": "error", "message": message}, status=status)
+    messages.error(request, message)
+    return redirect(redirect_to)
+
+
+def _process_in_memory_clients_spreadsheet(uploaded_file, user):
+    """
+    Procesa un archivo CSV o Excel de Clientes estrictamente en memoria (io.BytesIO + pandas)
+    con las columnas: Nombre Completo, Email, Teléfono, Sexo.
+    Libera inmediatamente el DataFrame y el buffer de RAM.
+    """
+    raw_bytes = uploaded_file.read()
+    buffer = io.BytesIO(raw_bytes)
+    uploaded_file.close()
+    df = None
+
+    try:
+        filename = (uploaded_file.name or "").lower().strip()
+        if filename.endswith(".csv"):
+            df = pd.read_csv(buffer, dtype=str, keep_default_na=False)
+            if len(df.columns) == 1 and ";" in str(df.columns[0]):
+                buffer.seek(0)
+                df = pd.read_csv(buffer, sep=";", dtype=str, keep_default_na=False)
+        else:
+            df = pd.read_excel(buffer, dtype=str, keep_default_na=False, engine="openpyxl")
+
+        if df is None or df.empty:
+            raise ValueError("El archivo no contiene filas para procesar.")
+
+        col_map = {}
+        aliases = {
+            "nombre_completo": {
+                "nombre_completo",
+                "nombre",
+                "cliente",
+                "name",
+                "full_name",
+                "razon_social",
+                "nombre_y_apellido",
+            },
+            "email": {
+                "email",
+                "correo",
+                "correo_electronico",
+                "mail",
+                "e_mail",
+            },
+            "telefono": {
+                "telefono",
+                "tel",
+                "phone",
+                "celular",
+                "movil",
+                "contacto",
+            },
+            "sexo": {
+                "sexo",
+                "sex",
+                "genero",
+                "gender",
+            },
+        }
+        for orig_col in df.columns:
+            norm_col = _normalize_header(orig_col)
+            for target_field, valid_names in aliases.items():
+                if norm_col in valid_names and target_field not in col_map:
+                    col_map[target_field] = orig_col
+
+        if "nombre_completo" not in col_map:
+            raise ValueError(
+                "Error de validación: El archivo debe incluir al menos la columna "
+                "Nombre Completo (junto con Email, Teléfono y Sexo)."
+            )
+
+        created_clients = []
+        with db_transaction.atomic():
+            for idx, row in df.iterrows():
+                row_num = idx + 2
+                raw_name = str(row[col_map["nombre_completo"]]).strip()
+                raw_email = (
+                    str(row[col_map["email"]]).strip()
+                    if "email" in col_map
+                    else ""
+                )
+                raw_phone = (
+                    str(row[col_map["telefono"]]).strip()
+                    if "telefono" in col_map
+                    else ""
+                )
+                raw_sex = (
+                    str(row[col_map["sexo"]]).strip()
+                    if "sexo" in col_map
+                    else ""
+                )
+
+                if raw_name.lower() in ("nan", "none"):
+                    raw_name = ""
+                if raw_email.lower() in ("nan", "none", "-"):
+                    raw_email = ""
+                if raw_phone.lower() in ("nan", "none", "-"):
+                    raw_phone = ""
+                if raw_sex.lower() in ("nan", "none", "-"):
+                    raw_sex = ""
+
+                if not any((raw_name, raw_email, raw_phone, raw_sex)):
+                    continue
+
+                if not raw_name:
+                    raise ValueError(
+                        f"Fila {row_num}: El nombre completo del cliente es obligatorio."
+                    )
+
+                norm_sex = raw_sex.upper()
+                if norm_sex in ("", "OTRO", "OTROS", "X"):
+                    parsed_sex = Cliente.Sexo.OTRO
+                elif norm_sex in ("M", "MASCULINO", "H", "HOMBRE"):
+                    parsed_sex = Cliente.Sexo.MASCULINO
+                elif norm_sex in ("F", "FEMENINO", "MUJER"):
+                    parsed_sex = Cliente.Sexo.FEMENINO
+                else:
+                    raise ValueError(
+                        f"Fila {row_num}: Sexo inválido '{raw_sex}' (use M, F u Otro)."
+                    )
+
+                form = ClienteForm(
+                    data={
+                        "nombre_completo": raw_name,
+                        "email": raw_email,
+                        "telefono": raw_phone,
+                        "sexo": parsed_sex,
+                    },
+                    user=user,
+                )
+                if not form.is_valid():
+                    err_detail = "; ".join(
+                        f"{', '.join(errs)}" for _, errs in form.errors.items()
+                    )
+                    raise ValueError(f"Fila {row_num}: {err_detail}")
+
+                created_clients.append(form.save())
+
+            if not created_clients:
+                raise ValueError("No se encontraron registros válidos en el archivo.")
+
+        return created_clients
+    finally:
+        if df is not None:
+            del df
+        buffer.close()
+        del buffer
+        del raw_bytes
+        gc.collect()
+
+
+@login_required
+@require_http_methods(["GET"])
+def clients_template_view(request):
+    """
+    Genera y descarga en memoria una plantilla Excel (.xlsx) con las 4 cabeceras
+    esperadas por el importador de Clientes y filas guía de ejemplo.
+    """
+    sample_rows = [
+        {
+            "Nombre Completo": "Cliente Ejemplo S.A.",
+            "Email": "contacto@clienteejemplo.com",
+            "Teléfono": "+54 9 11 4000-0000",
+            "Sexo": "Otro",
+        },
+        {
+            "Nombre Completo": "María González",
+            "Email": "maria.gonzalez@empresa.com",
+            "Teléfono": "+54 9 11 5000-0000",
+            "Sexo": "F",
+        },
+    ]
+    excel_bytes = _build_simple_excel_bytes(
+        sample_rows,
+        columns=CLIENT_SPREADSHEET_COLUMNS,
+        sheet_name="Plantilla",
+    )
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = (
+        'attachment; filename="plantilla_clientes.xlsx"'
+    )
+    return response
+
+
+@login_required
+@require_http_methods(["GET"])
+def clients_export_view(request):
+    """
+    Exporta la cartera de clientes del usuario autenticado en un archivo `.xlsx`
+    en memoria 100% compatible con el flujo de importación.
+    """
+    qs = Cliente.objects.filter(user=request.user).order_by(
+        "nombre_completo", "id"
+    )
+    rows_data = [
+        {
+            "Nombre Completo": c.nombre_completo,
+            "Email": c.email or "",
+            "Teléfono": c.telefono or "",
+            "Sexo": c.sexo or Cliente.Sexo.OTRO,
+        }
+        for c in qs
+    ]
+
+    if not rows_data:
+        return _module_export_error_response(
+            request,
+            "No se encontraron clientes registrados para exportar.",
+            redirect_to="app:clients",
+            status=404,
+        )
+
+    excel_bytes = _build_simple_excel_bytes(
+        rows_data,
+        columns=CLIENT_SPREADSHEET_COLUMNS,
+        sheet_name="Clientes",
+    )
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = (
+        'attachment; filename="clientes_exportados.xlsx"'
+    )
+    return response
+
+
 @login_required
 @require_http_methods(["GET", "POST"])
 def clients_view(request):
     """
     Lista los clientes del usuario y procesa peticiones POST (crear, editar,
-    subir PDF individual o eliminar clientes) validando extensión .pdf y límite de 10 MB.
+    subir PDF individual, eliminar o importar CSV/Excel en memoria) validando
+    extensión .pdf y límite de 10 MB para documentación y 5 MB para planillas.
     """
     if request.method == "GET":
+        download_mode = (request.GET.get("download") or "").strip().lower()
+        if download_mode == "template":
+            return clients_template_view(request)
+        if download_mode == "export":
+            return clients_export_view(request)
+
         page, per_page = _parse_pagination_params(request.GET)
         page_obj, pagination_meta = _paginate_user_clientes(
             request.user, page=page, per_page=per_page
@@ -531,6 +822,7 @@ def clients_view(request):
             )
 
         form = ClienteForm(user=request.user)
+        upload_form = ClienteBulkUploadForm()
         return render(
             request,
             "app/clientes.html",
@@ -541,6 +833,7 @@ def clients_view(request):
                 "per_page": per_page,
                 "allowed_page_sizes": ALLOWED_PAGE_SIZES,
                 "form": form,
+                "upload_form": upload_form,
             },
         )
 
@@ -556,7 +849,45 @@ def clients_view(request):
         payload = request.POST.dict()
 
     page, per_page = _parse_pagination_params(payload, request.GET)
-    action = payload.get("action") or "create"
+    action = payload.get("action") or (
+        "bulk_upload" if "file" in request.FILES else "create"
+    )
+
+    # 0. Subida masiva en memoria (CSV / Excel con pandas)
+    if action == "bulk_upload":
+        upload_form = ClienteBulkUploadForm(request.POST, request.FILES)
+        if not upload_form.is_valid():
+            error_msg = " ".join(
+                err for errs in upload_form.errors.values() for err in errs
+            )
+            return JsonResponse(
+                {"status": "error", "message": error_msg, "errors": upload_form.errors},
+                status=400,
+            )
+        try:
+            created_records = _process_in_memory_clients_spreadsheet(
+                upload_form.cleaned_data["file"], request.user
+            )
+        except Exception as exc:
+            return JsonResponse(
+                {"status": "error", "message": str(exc)},
+                status=400,
+            )
+
+        page_obj, pagination_meta = _paginate_user_clientes(
+            request.user, page=1, per_page=per_page
+        )
+        return JsonResponse(
+            {
+                "status": "ok",
+                "message": f"Ingesta completada: {len(created_records)} clientes procesados en memoria.",
+                "imported_count": len(created_records),
+                "clientes": [
+                    _serialize_cliente(c) for c in page_obj.object_list
+                ],
+                "pagination": pagination_meta,
+            }
+        )
 
     # 1. Eliminación de cliente
     if action == "delete":
@@ -734,12 +1065,500 @@ def client_delete_view(request, pk):
     )
 
 
+def _serialize_vertical(v):
+    """Serializa una instancia de Vertical de negocio."""
+    return {
+        "id": v.id,
+        "title": v.title,
+        "description": v.description or "",
+        "is_active": bool(v.is_active),
+        "deactivated_at": (
+            v.deactivated_at.isoformat() if v.deactivated_at else None
+        ),
+        "created_at": (
+            v.created_at.strftime("%Y-%m-%d")
+            if hasattr(v.created_at, "strftime")
+            else ""
+        ),
+    }
+
+
+def _paginate_user_verticals(user, page=1, per_page=DEFAULT_PAGE_SIZE):
+    """
+    Ejecuta la paginación en base de datos para las verticales ACTIVAS del usuario
+    y devuelve (page_obj, pagination_meta_dict).
+    """
+    per_page = max(1, min(int(per_page), MAX_PAGE_SIZE))
+    qs = Vertical.objects.filter(user=user, is_active=True).order_by("title", "-id")
+    paginator = Paginator(qs, per_page)
+    page_obj = paginator.get_page(page)
+
+    pagination_meta = {
+        "page": page_obj.number,
+        "per_page": per_page,
+        "total_pages": paginator.num_pages,
+        "total_count": paginator.count,
+        "has_previous": page_obj.has_previous(),
+        "has_next": page_obj.has_next(),
+        "previous_page": (
+            page_obj.previous_page_number() if page_obj.has_previous() else None
+        ),
+        "next_page": page_obj.next_page_number() if page_obj.has_next() else None,
+        "start_index": page_obj.start_index() if paginator.count > 0 else 0,
+        "end_index": page_obj.end_index() if paginator.count > 0 else 0,
+    }
+    return page_obj, pagination_meta
+
+
+def _process_in_memory_verticals_spreadsheet(uploaded_file, user):
+    """
+    Procesa un archivo CSV o Excel de Verticales estrictamente en memoria (io.BytesIO + pandas)
+    con las columnas: Título, Descripción.
+    Aplica las reglas de unicidad de verticales activas y reactivación controlada,
+    y libera inmediatamente el DataFrame y el buffer de RAM.
+    """
+    raw_bytes = uploaded_file.read()
+    buffer = io.BytesIO(raw_bytes)
+    uploaded_file.close()
+    df = None
+
+    try:
+        filename = (uploaded_file.name or "").lower().strip()
+        if filename.endswith(".csv"):
+            df = pd.read_csv(buffer, dtype=str, keep_default_na=False)
+            if len(df.columns) == 1 and ";" in str(df.columns[0]):
+                buffer.seek(0)
+                df = pd.read_csv(buffer, sep=";", dtype=str, keep_default_na=False)
+        else:
+            df = pd.read_excel(buffer, dtype=str, keep_default_na=False, engine="openpyxl")
+
+        if df is None or df.empty:
+            raise ValueError("El archivo no contiene filas para procesar.")
+
+        col_map = {}
+        aliases = {
+            "title": {
+                "titulo",
+                "title",
+                "vertical",
+                "nombre",
+                "unidad",
+                "unidad_de_negocio",
+            },
+            "description": {
+                "descripcion",
+                "description",
+                "detalle",
+                "detail",
+                "observacion",
+            },
+        }
+        for orig_col in df.columns:
+            norm_col = _normalize_header(orig_col)
+            for target_field, valid_names in aliases.items():
+                if norm_col in valid_names and target_field not in col_map:
+                    col_map[target_field] = orig_col
+
+        if "title" not in col_map:
+            raise ValueError(
+                "Error de validación: El archivo debe incluir al menos la columna "
+                "Título (junto con Descripción)."
+            )
+
+        processed_verticals = []
+        with db_transaction.atomic():
+            for idx, row in df.iterrows():
+                row_num = idx + 2
+                raw_title = str(row[col_map["title"]]).strip()
+                raw_desc = (
+                    str(row[col_map["description"]]).strip()
+                    if "description" in col_map
+                    else ""
+                )
+
+                if raw_title.lower() in ("nan", "none"):
+                    raw_title = ""
+                if raw_desc.lower() in ("nan", "none", "-"):
+                    raw_desc = ""
+
+                if not any((raw_title, raw_desc)):
+                    continue
+
+                if not raw_title:
+                    raise ValueError(
+                        f"Fila {row_num}: El título de la vertical es obligatorio."
+                    )
+
+                form = VerticalForm(
+                    data={
+                        "title": raw_title,
+                        "description": raw_desc,
+                    },
+                    user=user,
+                )
+                if not form.is_valid():
+                    err_detail = "; ".join(
+                        f"{', '.join(errs)}" for _, errs in form.errors.items()
+                    )
+                    raise ValueError(f"Fila {row_num}: {err_detail}")
+
+                processed_verticals.append(form.save())
+
+            if not processed_verticals:
+                raise ValueError("No se encontraron registros válidos en el archivo.")
+
+        return processed_verticals
+    finally:
+        if df is not None:
+            del df
+        buffer.close()
+        del buffer
+        del raw_bytes
+        gc.collect()
+
+
+@login_required
+@require_http_methods(["GET"])
+def verticals_template_view(request):
+    """
+    Genera y descarga en memoria una plantilla Excel (.xlsx) con las 2 cabeceras
+    esperadas por el importador de Verticales y filas guía de ejemplo.
+    """
+    sample_rows = [
+        {
+            "Título": "Consultoría Financiera",
+            "Descripción": "Asesoramiento y planificación de flujo de caja (fila guía de ejemplo)",
+        },
+        {
+            "Título": "Operaciones Digitales",
+            "Descripción": "Servicios recurrentes y suscripciones (fila guía de ejemplo)",
+        },
+    ]
+    excel_bytes = _build_simple_excel_bytes(
+        sample_rows,
+        columns=VERTICAL_SPREADSHEET_COLUMNS,
+        sheet_name="Plantilla",
+    )
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = (
+        'attachment; filename="plantilla_verticales.xlsx"'
+    )
+    return response
+
+
+@login_required
+@require_http_methods(["GET"])
+def verticals_export_view(request):
+    """
+    Exporta las verticales de negocio activas del usuario autenticado en un archivo `.xlsx`
+    en memoria 100% compatible con el flujo de importación.
+    """
+    qs = Vertical.objects.filter(user=request.user, is_active=True).order_by(
+        "title", "id"
+    )
+    rows_data = [
+        {
+            "Título": v.title,
+            "Descripción": v.description or "",
+        }
+        for v in qs
+    ]
+
+    if not rows_data:
+        return _module_export_error_response(
+            request,
+            "No se encontraron verticales activas registradas para exportar.",
+            redirect_to="app:verticals",
+            status=404,
+        )
+
+    excel_bytes = _build_simple_excel_bytes(
+        rows_data,
+        columns=VERTICAL_SPREADSHEET_COLUMNS,
+        sheet_name="Verticales",
+    )
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = (
+        'attachment; filename="verticales_exportadas.xlsx"'
+    )
+    return response
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def verticals_view(request):
+    """
+    Lista exclusivamente las verticales activas del usuario y procesa peticiones POST
+    (alta de vertical, baja lógica con is_active=False, edición en lote o importación
+    masiva CSV/Excel en memoria) dentro de transaction.atomic().
+    """
+    if request.method == "GET":
+        download_mode = (request.GET.get("download") or "").strip().lower()
+        if download_mode == "template":
+            return verticals_template_view(request)
+        if download_mode == "export":
+            return verticals_export_view(request)
+
+        page, per_page = _parse_pagination_params(request.GET)
+        page_obj, pagination_meta = _paginate_user_verticals(
+            request.user, page=page, per_page=per_page
+        )
+        is_ajax = (
+            request.headers.get("X-Requested-With") == "XMLHttpRequest"
+            or "application/json" in request.headers.get("Accept", "")
+        )
+        if is_ajax:
+            return JsonResponse(
+                {
+                    "status": "ok",
+                    "verticals": [
+                        _serialize_vertical(v) for v in page_obj.object_list
+                    ],
+                    "pagination": pagination_meta,
+                }
+            )
+
+        form = VerticalForm(user=request.user)
+        upload_form = VerticalBulkUploadForm()
+        return render(
+            request,
+            "app/verticals.html",
+            {
+                "verticals": page_obj.object_list,
+                "page_obj": page_obj,
+                "pagination": pagination_meta,
+                "per_page": per_page,
+                "allowed_page_sizes": ALLOWED_PAGE_SIZES,
+                "form": form,
+                "upload_form": upload_form,
+            },
+        )
+
+    content_type = request.content_type or ""
+    if "application/json" in content_type:
+        try:
+            payload = json.loads(request.body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return JsonResponse(
+                {"status": "error", "message": "Formato JSON inválido."},
+                status=400,
+            )
+    else:
+        payload = request.POST.dict()
+
+    page, per_page = _parse_pagination_params(payload, request.GET)
+    action = payload.get("action") or (
+        "bulk_upload" if "file" in request.FILES else "create"
+    )
+
+    # 0. Subida masiva en memoria (CSV / Excel con pandas)
+    if action == "bulk_upload":
+        upload_form = VerticalBulkUploadForm(request.POST, request.FILES)
+        if not upload_form.is_valid():
+            error_msg = " ".join(
+                err for errs in upload_form.errors.values() for err in errs
+            )
+            return JsonResponse(
+                {"status": "error", "message": error_msg, "errors": upload_form.errors},
+                status=400,
+            )
+        try:
+            created_records = _process_in_memory_verticals_spreadsheet(
+                upload_form.cleaned_data["file"], request.user
+            )
+        except Exception as exc:
+            return JsonResponse(
+                {"status": "error", "message": str(exc)},
+                status=400,
+            )
+
+        page_obj, pagination_meta = _paginate_user_verticals(
+            request.user, page=1, per_page=per_page
+        )
+        return JsonResponse(
+            {
+                "status": "ok",
+                "message": f"Ingesta completada: {len(created_records)} verticales procesadas en memoria.",
+                "imported_count": len(created_records),
+                "verticals": [
+                    _serialize_vertical(v) for v in page_obj.object_list
+                ],
+                "pagination": pagination_meta,
+            }
+        )
+
+    # 1. Baja lógica de vertical (nunca se elimina físicamente de la base de datos)
+    if action in ("deactivate", "delete"):
+        vertical_id = payload.get("id")
+        if not vertical_id:
+            return JsonResponse(
+                {"status": "error", "message": "ID de vertical requerido."},
+                status=400,
+            )
+        with db_transaction.atomic():
+            vertical = get_object_or_404(
+                Vertical, pk=vertical_id, user=request.user
+            )
+            vertical.deactivate()
+
+        page_obj, pagination_meta = _paginate_user_verticals(
+            request.user, page=page, per_page=per_page
+        )
+        return JsonResponse(
+            {
+                "status": "ok",
+                "message": f"Vertical '{vertical.title}' dada de baja correctamente.",
+                "deactivated_id": vertical.id,
+                "verticals": [
+                    _serialize_vertical(v) for v in page_obj.object_list
+                ],
+                "pagination": pagination_meta,
+            }
+        )
+
+    # 2. Guardado masivo de ediciones en la tabla ("Guardar Cambios", igual que en Transacciones)
+    if action == "bulk_save":
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or not rows:
+            return JsonResponse(
+                {
+                    "status": "error",
+                    "message": "No hay cambios pendientes para guardar.",
+                },
+                status=400,
+            )
+
+        saved_instances = []
+        try:
+            with db_transaction.atomic():
+                for idx, row_data in enumerate(rows, start=1):
+                    v_id = row_data.get("id")
+                    instance = None
+                    if v_id:
+                        instance = get_object_or_404(
+                            Vertical,
+                            pk=v_id,
+                            user=request.user,
+                            is_active=True,
+                        )
+                    form = VerticalForm(
+                        data=row_data, instance=instance, user=request.user
+                    )
+                    if not form.is_valid():
+                        err_detail = "; ".join(
+                            f"{', '.join(errs)}"
+                            for _, errs in form.errors.items()
+                        )
+                        raise ValueError(f"Fila {idx} inválida ({err_detail}).")
+                    v_obj = form.save()
+                    saved_instances.append(v_obj)
+        except ValueError as err:
+            return JsonResponse(
+                {"status": "error", "message": str(err)},
+                status=400,
+            )
+
+        page_obj, pagination_meta = _paginate_user_verticals(
+            request.user, page=page, per_page=per_page
+        )
+        return JsonResponse(
+            {
+                "status": "ok",
+                "message": f"Cambios confirmados: {len(saved_instances)} vertical(es) guardada(s).",
+                "saved_verticals": [
+                    _serialize_vertical(v) for v in saved_instances
+                ],
+                "verticals": [
+                    _serialize_vertical(v) for v in page_obj.object_list
+                ],
+                "pagination": pagination_meta,
+            }
+        )
+
+    # 3. Alta (o edición/reactivación controlada) de vertical individual
+    instance = None
+    if action == "update" and payload.get("id"):
+        instance = get_object_or_404(
+            Vertical, pk=payload.get("id"), user=request.user
+        )
+
+    form = VerticalForm(data=payload, instance=instance, user=request.user)
+    if form.is_valid():
+        with db_transaction.atomic():
+            was_reactivated = form.reactivated_instance is not None
+            vertical_obj = form.save()
+
+        status_code = 200 if (instance or was_reactivated) else 201
+        page_obj, pagination_meta = _paginate_user_verticals(
+            request.user, page=page, per_page=per_page
+        )
+        if was_reactivated:
+            msg = f"Vertical '{vertical_obj.title}' reactivada correctamente."
+        elif instance:
+            msg = "Vertical actualizada correctamente."
+        else:
+            msg = "Vertical creada correctamente."
+
+        return JsonResponse(
+            {
+                "status": "ok",
+                "message": msg,
+                "reactivated": was_reactivated,
+                "vertical": _serialize_vertical(vertical_obj),
+                "verticals": [
+                    _serialize_vertical(v) for v in page_obj.object_list
+                ],
+                "pagination": pagination_meta,
+            },
+            status=status_code,
+        )
+
+    error_summary = "; ".join(
+        f"{', '.join(errs)}" for _, errs in form.errors.items()
+    )
+    return JsonResponse(
+        {
+            "status": "error",
+            "message": error_summary
+            or "Error de validación en los datos de la vertical.",
+            "errors": form.errors,
+        },
+        status=400,
+    )
+
+
+@login_required
+@require_http_methods(["POST"])
+def vertical_deactivate_view(request, pk):
+    """Endpoint dedicado para dar de baja lógica una vertical activa perteneciente al usuario."""
+    with db_transaction.atomic():
+        vertical = get_object_or_404(Vertical, pk=pk, user=request.user)
+        vertical.deactivate()
+    return JsonResponse(
+        {
+            "status": "ok",
+            "message": f"Vertical '{vertical.title}' dada de baja correctamente.",
+            "deactivated_id": vertical.id,
+        }
+    )
+
+
 def _serialize_transaction(tx):
     """Serializa una instancia de Transaction con los 8 campos operativos."""
+    v_obj = tx.vertical if tx.vertical_id else None
+    v_title = v_obj.title if v_obj else ""
+    v_active = bool(v_obj.is_active) if v_obj else True
+    v_display = (
+        f"{v_title} (Inactiva)" if (v_obj and not v_active) else v_title
+    )
     return {
         "id": tx.id,
         "date": tx.date.strftime("%Y-%m-%d") if hasattr(tx.date, "strftime") else str(tx.date),
-        "vertical": tx.vertical or "",
+        "vertical": v_title,
+        "vertical_id": tx.vertical_id or "",
+        "vertical_title": v_title,
+        "vertical_is_active": v_active,
+        "vertical_display": v_display,
         "transaction_type": tx.transaction_type,
         "transaction_type_display": tx.get_transaction_type_display(),
         "concept": tx.concept,
@@ -879,82 +1698,152 @@ def _process_in_memory_spreadsheet(uploaded_file, user):
         clients_by_name = {c.name.strip().lower(): c for c in user_clients}
         clients_by_id = {c.id: c for c in user_clients}
 
+        user_verticals = list(Vertical.objects.filter(user=user))
+        active_verticals_by_id = {
+            v.id: v for v in user_verticals if v.is_active
+        }
+        inactive_verticals_by_id = {
+            v.id: v for v in user_verticals if not v.is_active
+        }
+        active_verticals_by_title = {}
+        inactive_verticals_by_title = {}
+        for v in user_verticals:
+            exact_key = " ".join(v.title.strip().lower().split())
+            norm_key = normalize_vertical_title_key(v.title)
+            if v.is_active:
+                active_verticals_by_title[exact_key] = v
+                active_verticals_by_title[norm_key] = v
+            else:
+                inactive_verticals_by_title[exact_key] = v
+                inactive_verticals_by_title[norm_key] = v
+
         transactions_to_create = []
-        for idx, row in df.iterrows():
-            row_num = idx + 2
-            raw_date = str(row[col_map["date"]]).strip()
-            raw_type = str(row[col_map["transaction_type"]]).strip()
-            raw_concept = str(row[col_map["concept"]]).strip()
-            raw_amount = str(row[col_map["amount"]]).strip()
-            raw_vertical = (
-                str(row[col_map["vertical"]]).strip() if "vertical" in col_map else ""
-            )
-            raw_detail = (
-                str(row[col_map["detail"]]).strip() if "detail" in col_map else ""
-            )
-            raw_currency = (
-                str(row[col_map["currency"]]).strip() if "currency" in col_map else "ARS"
-            )
+        with db_transaction.atomic():
+            for idx, row in df.iterrows():
+                row_num = idx + 2
+                raw_date = str(row[col_map["date"]]).strip()
+                raw_type = str(row[col_map["transaction_type"]]).strip()
+                raw_concept = str(row[col_map["concept"]]).strip()
+                raw_amount = str(row[col_map["amount"]]).strip()
+                raw_vertical = (
+                    str(row[col_map["vertical"]]).strip()
+                    if "vertical" in col_map
+                    else ""
+                )
+                raw_detail = (
+                    str(row[col_map["detail"]]).strip()
+                    if "detail" in col_map
+                    else ""
+                )
+                raw_currency = (
+                    str(row[col_map["currency"]]).strip()
+                    if "currency" in col_map
+                    else "ARS"
+                )
 
-            if not any((raw_date, raw_type, raw_concept, raw_amount)):
-                continue
+                if not any((raw_date, raw_type, raw_concept, raw_amount)):
+                    continue
 
-            try:
-                parsed_date = _parse_date_value(raw_date)
-                parsed_type = _parse_type_value(raw_type)
-                parsed_amount = _parse_amount_value(raw_amount)
-                parsed_currency = _parse_currency_value(raw_currency)
-            except ValueError as err:
-                raise ValueError(f"Fila {row_num}: {err}") from err
+                try:
+                    parsed_date = _parse_date_value(raw_date)
+                    parsed_type = _parse_type_value(raw_type)
+                    parsed_amount = _parse_amount_value(raw_amount)
+                    parsed_currency = _parse_currency_value(raw_currency)
+                except ValueError as err:
+                    raise ValueError(f"Fila {row_num}: {err}") from err
 
-            if not raw_concept:
-                raise ValueError(f"Fila {row_num}: El concepto es obligatorio.")
+                if not raw_concept:
+                    raise ValueError(f"Fila {row_num}: El concepto es obligatorio.")
 
-            if raw_vertical.lower() in ("nan", "none"):
-                raw_vertical = ""
-            if raw_detail.lower() in ("nan", "none"):
-                raw_detail = ""
-
-            client_obj = None
-            if "client" in col_map:
-                raw_client = str(row[col_map["client"]]).strip()
-                if raw_client and raw_client.lower() not in (
+                raw_vertical_clean = " ".join(raw_vertical.split())
+                if raw_vertical_clean.lower() in (
                     "nan",
                     "none",
                     "-",
-                    "sin cliente",
-                    "— sin cliente —",
+                    "sin vertical",
+                    "— sin vertical —",
                 ):
-                    if raw_client.isdigit() and int(raw_client) in clients_by_id:
-                        client_obj = clients_by_id[int(raw_client)]
-                    else:
-                        client_key = raw_client.lower()
-                        client_obj = clients_by_name.get(client_key)
-                        if client_obj is None:
-                            client_obj = Client.objects.create(
-                                user=user, name=raw_client[:150]
+                    raw_vertical_clean = ""
+                if raw_detail.lower() in ("nan", "none"):
+                    raw_detail = ""
+
+                vertical_obj = None
+                if raw_vertical_clean:
+                    if raw_vertical_clean.isdigit():
+                        v_id = int(raw_vertical_clean)
+                        if v_id in active_verticals_by_id:
+                            vertical_obj = active_verticals_by_id[v_id]
+                        elif v_id in inactive_verticals_by_id:
+                            inact_v = inactive_verticals_by_id[v_id]
+                            raise ValueError(
+                                f"Fila {row_num}: La vertical '{inact_v.title}' se encuentra dada de baja (inactiva)."
                             )
-                            clients_by_name[client_key] = client_obj
-                            clients_by_id[client_obj.id] = client_obj
+                        else:
+                            raise ValueError(
+                                f"Fila {row_num}: La vertical con ID '{raw_vertical_clean}' no existe o no pertenece a su cuenta."
+                            )
+                    else:
+                        v_exact_key = raw_vertical_clean.lower()
+                        v_norm_key = normalize_vertical_title_key(
+                            raw_vertical_clean
+                        )
+                        vertical_obj = active_verticals_by_title.get(
+                            v_exact_key
+                        ) or active_verticals_by_title.get(v_norm_key)
+                        if vertical_obj is None:
+                            inact_v = inactive_verticals_by_title.get(
+                                v_exact_key
+                            ) or inactive_verticals_by_title.get(v_norm_key)
+                            if inact_v is not None:
+                                raise ValueError(
+                                    f"Fila {row_num}: La vertical '{raw_vertical_clean}' se encuentra dada de baja (inactiva)."
+                                )
+                            raise ValueError(
+                                f"Fila {row_num}: La vertical '{raw_vertical_clean}' no existe entre las verticales activas de su cuenta."
+                            )
 
-            transactions_to_create.append(
-                Transaction(
-                    user=user,
-                    date=parsed_date,
-                    vertical=raw_vertical[:120],
-                    transaction_type=parsed_type,
-                    concept=raw_concept[:150],
-                    client=client_obj,
-                    detail=raw_detail[:255],
-                    amount=parsed_amount,
-                    currency=parsed_currency,
+                client_obj = None
+                if "client" in col_map:
+                    raw_client = str(row[col_map["client"]]).strip()
+                    if raw_client and raw_client.lower() not in (
+                        "nan",
+                        "none",
+                        "-",
+                        "sin cliente",
+                        "— sin cliente —",
+                    ):
+                        if (
+                            raw_client.isdigit()
+                            and int(raw_client) in clients_by_id
+                        ):
+                            client_obj = clients_by_id[int(raw_client)]
+                        else:
+                            client_key = raw_client.lower()
+                            client_obj = clients_by_name.get(client_key)
+                            if client_obj is None:
+                                client_obj = Client.objects.create(
+                                    user=user, name=raw_client[:150]
+                                )
+                                clients_by_name[client_key] = client_obj
+                                clients_by_id[client_obj.id] = client_obj
+
+                transactions_to_create.append(
+                    Transaction(
+                        user=user,
+                        date=parsed_date,
+                        vertical=vertical_obj,
+                        transaction_type=parsed_type,
+                        concept=raw_concept[:150],
+                        client=client_obj,
+                        detail=raw_detail[:255],
+                        amount=parsed_amount,
+                        currency=parsed_currency,
+                    )
                 )
-            )
 
-        if not transactions_to_create:
-            raise ValueError("No se encontraron registros válidos en el archivo.")
+            if not transactions_to_create:
+                raise ValueError("No se encontraron registros válidos en el archivo.")
 
-        with db_transaction.atomic():
             created = Transaction.objects.bulk_create(
                 transactions_to_create, batch_size=500
             )
@@ -976,7 +1865,7 @@ def _paginate_user_transactions(user, page=1, per_page=DEFAULT_PAGE_SIZE):
     per_page = max(1, min(int(per_page), MAX_PAGE_SIZE))
     qs = (
         Transaction.objects.filter(user=user)
-        .select_related("client")
+        .select_related("client", "vertical")
         .order_by("-date", "-id")
     )
     paginator = Paginator(qs, per_page)
@@ -999,6 +1888,258 @@ def _paginate_user_transactions(user, page=1, per_page=DEFAULT_PAGE_SIZE):
     return page_obj, pagination_meta
 
 
+def _get_active_verticals_list(user):
+    """Retorna la lista serializada de verticales activas del usuario."""
+    return [
+        {"id": v.id, "title": v.title}
+        for v in Vertical.objects.filter(user=user, is_active=True).order_by(
+            "title"
+        )
+    ]
+
+
+TRANSACTION_SPREADSHEET_COLUMNS = [
+    "Fecha",
+    "Vertical",
+    "Tipo",
+    "Concepto",
+    "Cliente",
+    "Detalle",
+    "Monto",
+    "Moneda",
+]
+
+XLSX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+
+def _build_excel_bytes(
+    rows_data,
+    sheet_name="Transacciones",
+    active_verticals=None,
+    extra_columns=None,
+):
+    """
+    Construye un archivo Excel (.xlsx) estrictamente en memoria (io.BytesIO + pandas/openpyxl)
+    con las 8 columnas operativas exactas (más una segunda hoja 'Verticales_Activas' con las
+    verticales activas del usuario) y libera inmediatamente el DataFrame y el buffer.
+    """
+    buffer = io.BytesIO()
+    cols = list(TRANSACTION_SPREADSHEET_COLUMNS)
+    if extra_columns:
+        for col in extra_columns:
+            if col not in cols:
+                cols.append(col)
+    df = pd.DataFrame(rows_data, columns=cols)
+    vert_rows = [
+        {
+            "ID": v.id,
+            "Vertical": v.title,
+            "Descripcion": v.description or "",
+        }
+        for v in (active_verticals or [])
+    ]
+    vert_df = pd.DataFrame(
+        vert_rows, columns=["ID", "Vertical", "Descripcion"]
+    )
+    try:
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+            vert_df.to_excel(
+                writer, index=False, sheet_name="Verticales_Activas"
+            )
+        return buffer.getvalue()
+    finally:
+        del df
+        del vert_df
+        buffer.close()
+        del buffer
+        gc.collect()
+
+
+def _export_error_response(request, message, status=400):
+    """
+    Devuelve una respuesta de error de validación en JSON cuando la petición proviene
+    de Fetch API / AJAX, o redirige a la vista de Transacciones con un mensaje en caso contrario.
+    """
+    is_ajax = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in request.headers.get("Accept", "")
+    )
+    if is_ajax:
+        return JsonResponse({"status": "error", "message": message}, status=status)
+    messages.error(request, message)
+    return redirect("app:transactions")
+
+
+@login_required
+@require_http_methods(["GET"])
+def transactions_template_view(request):
+    """
+    Genera y descarga en memoria una plantilla Excel (.xlsx) con las 8 cabeceras
+    esperadas por el importador, filas guía válidas basadas en las verticales activas
+    del usuario y la hoja 'Verticales_Activas' de referencia.
+    """
+    active_verticals = list(
+        Vertical.objects.filter(user=request.user, is_active=True).order_by(
+            "title"
+        )
+    )
+    v1_title = active_verticals[0].title if len(active_verticals) >= 1 else ""
+    v2_title = (
+        active_verticals[1].title
+        if len(active_verticals) >= 2
+        else v1_title
+    )
+    sample_rows = [
+        {
+            "Fecha": "2026-11-01",
+            "Vertical": v1_title,
+            "Tipo": "Ingreso",
+            "Concepto": "Honorarios Mensuales",
+            "Cliente": "Cliente Ejemplo S.A.",
+            "Detalle": "Abono mensual (fila guía de ejemplo)",
+            "Monto": "150000.00",
+            "Moneda": "ARS",
+        },
+        {
+            "Fecha": "2026-11-02",
+            "Vertical": v2_title,
+            "Tipo": "Gasto",
+            "Concepto": "Licencias Software",
+            "Cliente": "",
+            "Detalle": "Infraestructura cloud (fila guía de ejemplo)",
+            "Monto": "25.50",
+            "Moneda": "USD",
+        },
+    ]
+    excel_bytes = _build_excel_bytes(
+        sample_rows,
+        sheet_name="Plantilla",
+        active_verticals=active_verticals,
+    )
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = (
+        'attachment; filename="plantilla_transacciones.xlsx"'
+    )
+    return response
+
+
+@login_required
+@require_http_methods(["GET"])
+def transactions_export_view(request):
+    """
+    Exporta las transacciones del usuario autenticado (filtradas por rango de fechas
+    `fecha_desde` y `fecha_hasta` cuando se proporcionan, o completas cuando no se envían
+    parámetros en descarga directa) en un archivo `.xlsx` en memoria 100% compatible con
+    el flujo de importación y preservando verticales históricas.
+    """
+    raw_start = (
+        request.GET.get("fecha_desde") or request.GET.get("start_date") or ""
+    ).strip()
+    raw_end = (
+        request.GET.get("fecha_hasta") or request.GET.get("end_date") or ""
+    ).strip()
+
+    is_ajax = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in request.headers.get("Accept", "")
+    )
+
+    start_date = None
+    end_date = None
+    if raw_start or raw_end or is_ajax:
+        if not raw_start or not raw_end:
+            return _export_error_response(
+                request,
+                "Error de validación: Debe especificar las fechas 'Desde' y 'Hasta' para exportar.",
+                status=400,
+            )
+
+        try:
+            start_date = _parse_date_value(raw_start)
+            end_date = _parse_date_value(raw_end)
+        except ValueError:
+            return _export_error_response(
+                request,
+                "Error de validación: Formato de fecha inválido. Utilice el formato YYYY-MM-DD.",
+                status=400,
+            )
+
+        if start_date > end_date:
+            return _export_error_response(
+                request,
+                "Error de validación: La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.",
+                status=400,
+            )
+
+    qs = Transaction.objects.filter(user=request.user).select_related(
+        "client", "vertical"
+    )
+    if start_date and end_date:
+        qs = qs.filter(date__gte=start_date, date__lte=end_date).order_by(
+            "date", "id"
+        )
+    else:
+        qs = qs.order_by("date", "id")
+
+    rows_data = [
+        {
+            "Fecha": (
+                tx.date.strftime("%Y-%m-%d")
+                if hasattr(tx.date, "strftime")
+                else str(tx.date)
+            ),
+            "Vertical": (
+                tx.vertical.title if tx.vertical_id and tx.vertical else ""
+            ),
+            "Tipo": (
+                "Ingreso"
+                if tx.transaction_type == Transaction.TransactionType.INCOME
+                else "Gasto"
+            ),
+            "Concepto": tx.concept,
+            "Cliente": tx.client.name if tx.client_id and tx.client else "",
+            "Detalle": tx.detail or "",
+            "Monto": f"{Decimal(tx.amount):.2f}",
+            "Moneda": tx.currency or Transaction.Currency.ARS,
+        }
+        for tx in qs
+    ]
+
+    if not rows_data:
+        if start_date and end_date:
+            return _export_error_response(
+                request,
+                f"No se encontraron transacciones registradas entre {start_date.strftime('%Y-%m-%d')} y {end_date.strftime('%Y-%m-%d')}.",
+                status=404,
+            )
+        return _export_error_response(
+            request,
+            "No se encontraron transacciones registradas para exportar.",
+            status=404,
+        )
+
+    active_verticals = list(
+        Vertical.objects.filter(user=request.user, is_active=True).order_by(
+            "title"
+        )
+    )
+    excel_bytes = _build_excel_bytes(
+        rows_data,
+        sheet_name="Transacciones",
+        active_verticals=active_verticals,
+    )
+    if start_date and end_date:
+        filename = f"transacciones_{start_date.strftime('%Y-%m-%d')}_a_{end_date.strftime('%Y-%m-%d')}.xlsx"
+    else:
+        filename = "transacciones_exportadas.xlsx"
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+
 @login_required
 @require_http_methods(["GET", "POST"])
 def transactions_view(request):
@@ -1008,6 +2149,12 @@ def transactions_view(request):
     guardar en lote (Guardar Cambios), eliminar e importar CSV/Excel en memoria.
     """
     if request.method == "GET":
+        download_mode = (request.GET.get("download") or "").strip().lower()
+        if download_mode == "template":
+            return transactions_template_view(request)
+        if download_mode == "export":
+            return transactions_export_view(request)
+
         page, per_page = _parse_pagination_params(request.GET)
         page_obj, pagination_meta = _paginate_user_transactions(
             request.user, page=page, per_page=per_page
@@ -1021,6 +2168,7 @@ def transactions_view(request):
             return JsonResponse(
                 {
                     "status": "ok",
+                    "active_verticals": _get_active_verticals_list(request.user),
                     "transactions": [
                         _serialize_transaction(tx) for tx in page_obj.object_list
                     ],
@@ -1029,6 +2177,9 @@ def transactions_view(request):
             )
 
         clients = Client.objects.filter(user=request.user).order_by("name")
+        active_verticals = Vertical.objects.filter(
+            user=request.user, is_active=True
+        ).order_by("title")
         form = TransactionForm(user=request.user)
         upload_form = TransactionBulkUploadForm()
         return render(
@@ -1041,6 +2192,7 @@ def transactions_view(request):
                 "per_page": per_page,
                 "allowed_page_sizes": ALLOWED_PAGE_SIZES,
                 "clients": clients,
+                "active_verticals": active_verticals,
                 "form": form,
                 "upload_form": upload_form,
             },
@@ -1097,6 +2249,7 @@ def transactions_view(request):
                 "message": f"Ingesta completada: {len(created_records)} transacciones procesadas en memoria.",
                 "imported_count": len(created_records),
                 "clients": all_clients,
+                "active_verticals": _get_active_verticals_list(request.user),
                 "transactions": [
                     _serialize_transaction(tx) for tx in page_obj.object_list
                 ],
@@ -1112,9 +2265,10 @@ def transactions_view(request):
                 {"status": "error", "message": "Identificador de transacción requerido."},
                 status=400,
             )
-        tx = get_object_or_404(Transaction, pk=tx_id, user=request.user)
-        deleted_id = tx.id
-        tx.delete()
+        with db_transaction.atomic():
+            tx = get_object_or_404(Transaction, pk=tx_id, user=request.user)
+            deleted_id = tx.id
+            tx.delete()
         page_obj, pagination_meta = _paginate_user_transactions(
             request.user, page=page, per_page=per_page
         )
@@ -1123,6 +2277,7 @@ def transactions_view(request):
                 "status": "ok",
                 "message": "Transacción eliminada correctamente.",
                 "deleted_id": deleted_id,
+                "active_verticals": _get_active_verticals_list(request.user),
                 "transactions": [
                     _serialize_transaction(item) for item in page_obj.object_list
                 ],
@@ -1178,6 +2333,7 @@ def transactions_view(request):
                 "status": "ok",
                 "message": f"Cambios confirmados: {len(saved_instances)} registro(s) guardado(s).",
                 "clients": all_clients,
+                "active_verticals": _get_active_verticals_list(request.user),
                 "saved_transactions": [_serialize_transaction(tx) for tx in saved_instances],
                 "transactions": [
                     _serialize_transaction(tx) for tx in page_obj.object_list
@@ -1199,7 +2355,8 @@ def transactions_view(request):
 
     form = TransactionForm(data=payload, instance=instance, user=request.user)
     if form.is_valid():
-        tx_obj = form.save()
+        with db_transaction.atomic():
+            tx_obj = form.save()
         status_code = 200 if instance else 201
         all_clients = [
             {"id": c.id, "name": c.name}
@@ -1214,6 +2371,7 @@ def transactions_view(request):
                     else "Transacción creada correctamente."
                 ),
                 "clients": all_clients,
+                "active_verticals": _get_active_verticals_list(request.user),
                 "transaction": _serialize_transaction(tx_obj),
             },
             status=status_code,

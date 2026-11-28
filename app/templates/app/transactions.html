@@ -15,12 +15,12 @@
     <!-- Notificaciones Dinámicas (Fetch API) -->
     <div id="tx-status-banner" class="alert-stoic tx-status-hidden" role="status" aria-live="polite"></div>
 
-    <!-- Panel de Ingesta Masiva en Memoria (CSV / Excel) -->
-    <section class="tx-upload-panel" aria-label="Ingesta masiva de archivos">
+    <!-- Panel de Ingesta Masiva en Memoria (CSV / Excel) y Exportación -->
+    <section class="tx-upload-panel" aria-label="Ingesta masiva y exportación de archivos">
         <div class="tx-upload-info">
             <h2 class="tx-panel-heading">Ingesta Masiva en Memoria (CSV / Excel)</h2>
             <p class="tx-panel-help">
-                Estructura de columnas: <code>Fecha</code> (YYYY-MM-DD), <code>Vertical</code>, <code>Tipo</code> (Gasto/Ingreso), <code>Concepto</code>, <code>Cliente</code> (nombre o ID), <code>Detalle</code>, <code>Monto</code> y <code>Moneda</code> (ARS/USD). Límite: 5 MB en RAM.
+                Estructura de columnas: <code>Fecha</code> (YYYY-MM-DD), <code>Vertical</code> (solo verticales activas registradas), <code>Tipo</code> (Gasto/Ingreso), <code>Concepto</code>, <code>Cliente</code> (nombre o ID), <code>Detalle</code>, <code>Monto</code> y <code>Moneda</code> (ARS/USD). Límite: 5 MB en RAM.
             </p>
         </div>
         <form id="bulk-upload-form" class="tx-upload-form" method="post" action="{% url 'app:transactions' %}" enctype="multipart/form-data" novalidate>
@@ -31,6 +31,40 @@
                 <button type="submit" id="btn-upload-submit" class="btn-secondary tx-upload-btn">
                     Importar Archivo
                 </button>
+                <a href="{% url 'app:transactions_template' %}" id="btn-download-template" class="btn-outline tx-template-btn">
+                    Descargar Plantilla
+                </a>
+            </div>
+        </form>
+
+        <!-- Subpanel de Exportación por Rango de Fechas -->
+        <form id="export-transactions-form" class="tx-export-form" method="get" action="{% url 'app:transactions_export' %}" novalidate>
+            <div class="tx-export-controls">
+                <div class="tx-export-field">
+                    <label for="export-fecha-desde" class="tx-export-label">Fecha desde</label>
+                    <input
+                        type="date"
+                        id="export-fecha-desde"
+                        name="fecha_desde"
+                        class="sheet-input tx-export-date-input"
+                        required
+                        aria-label="Fecha desde">
+                </div>
+                <div class="tx-export-field">
+                    <label for="export-fecha-hasta" class="tx-export-label">Fecha hasta</label>
+                    <input
+                        type="date"
+                        id="export-fecha-hasta"
+                        name="fecha_hasta"
+                        class="sheet-input tx-export-date-input"
+                        required
+                        aria-label="Fecha hasta">
+                </div>
+                <div class="tx-export-actions">
+                    <button type="submit" id="btn-export-data" class="btn-secondary tx-export-btn">
+                        Exportar Datos
+                    </button>
+                </div>
             </div>
         </form>
     </section>
@@ -61,6 +95,14 @@
         {% endfor %}
     </datalist>
 
+    <script id="active-verticals-data" type="application/json">
+        [
+            {% for v in active_verticals %}
+            {"id": {{ v.id }}, "title": "{{ v.title|escapejs }}"}{% if not forloop.last %},{% endif %}
+            {% endfor %}
+        ]
+    </script>
+
     <!-- Tabla Editable Tipo Hoja de Cálculo (8 Columnas Contables + Acciones) -->
     <div class="sheet-container">
         <div class="table-responsive-wrapper">
@@ -80,7 +122,11 @@
                 </thead>
                 <tbody id="transactions-tbody">
                     {% for tx in transactions %}
-                    <tr class="sheet-row" data-id="{{ tx.id }}" data-client-id="{{ tx.client_id|default:'' }}" data-dirty="false">
+                    <tr class="sheet-row"
+                        data-id="{{ tx.id }}"
+                        data-client-id="{{ tx.client_id|default:'' }}"
+                        data-vertical-id="{{ tx.vertical_id|default:'' }}"
+                        data-dirty="false">
                         <td class="cell-date">
                             <input
                                 type="date"
@@ -92,15 +138,15 @@
                                 aria-label="Fecha">
                         </td>
                         <td class="cell-vertical">
-                            <input
-                                type="text"
-                                name="vertical"
-                                class="sheet-input"
-                                value="{{ tx.vertical }}"
-                                maxlength="120"
-                                placeholder="Unidad de negocio"
-                                disabled
-                                aria-label="Vertical">
+                            <select name="vertical" class="sheet-select" disabled aria-label="Vertical">
+                                <option value="" {% if not tx.vertical_id %}selected{% endif %}>— Sin vertical —</option>
+                                {% for v in active_verticals %}
+                                    <option value="{{ v.id }}" {% if tx.vertical_id == v.id %}selected{% endif %}>{{ v.title }}</option>
+                                {% endfor %}
+                                {% if tx.vertical_id and not tx.vertical.is_active %}
+                                    <option value="{{ tx.vertical.id }}" selected data-inactive="true">{{ tx.vertical.title }} (Inactiva)</option>
+                                {% endif %}
+                            </select>
                         </td>
                         <td class="cell-type">
                             <select name="transaction_type" class="sheet-select" disabled aria-label="Tipo">
@@ -254,7 +300,47 @@
     var statusBanner = document.getElementById("tx-status-banner");
     var uploadForm = document.getElementById("bulk-upload-form");
     var uploadBtn = document.getElementById("btn-upload-submit");
+    var exportForm = document.getElementById("export-transactions-form");
+    var exportBtn = document.getElementById("btn-export-data");
+    var exportStartInput = document.getElementById("export-fecha-desde");
+    var exportEndInput = document.getElementById("export-fecha-hasta");
     var clientsDatalist = document.getElementById("clients-datalist");
+    var activeVerticalsScript = document.getElementById("active-verticals-data");
+    var activeVerticals = [];
+    if (activeVerticalsScript) {
+        try {
+            activeVerticals = JSON.parse(activeVerticalsScript.textContent || "[]");
+        } catch (e) {
+            activeVerticals = [];
+        }
+    }
+
+    function escapeHTML(str) {
+        return String(str || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    }
+
+    function buildVerticalOptionsHTML(txData, isNew) {
+        var selectedId = txData && txData.vertical_id ? String(txData.vertical_id) : "";
+        var html = '<option value=""' + (!selectedId ? " selected" : "") + ">— Sin vertical —</option>";
+        var foundInActive = false;
+        for (var i = 0; i < activeVerticals.length; i++) {
+            var v = activeVerticals[i];
+            var vIdStr = String(v.id);
+            var isSel = selectedId && selectedId === vIdStr;
+            if (isSel) foundInActive = true;
+            html += '<option value="' + escapeHTML(vIdStr) + '"' + (isSel ? " selected" : "") + ">" + escapeHTML(v.title) + "</option>";
+        }
+        // Si es una transacción histórica con una vertical que fue dada de baja (inactiva), se preserva y marca visualmente
+        if (!isNew && selectedId && !foundInActive && txData.vertical_title) {
+            var inactLabel = txData.vertical_title + (txData.vertical_is_active === false ? " (Inactiva)" : "");
+            html += '<option value="' + escapeHTML(selectedId) + '" selected data-inactive="true">' + escapeHTML(inactLabel) + "</option>";
+        }
+        return html;
+    }
 
     // Estado y controles de paginación
     var paginationNav = document.querySelector(".sheet-pagination");
@@ -361,6 +447,9 @@
                 showBanner("Error al cargar la página solicitada.", true);
                 return;
             }
+            if (Array.isArray(result.data.active_verticals)) {
+                activeVerticals = result.data.active_verticals;
+            }
             if (Array.isArray(result.data.transactions)) {
                 renderAllRows(result.data.transactions);
             }
@@ -436,10 +525,10 @@
         tr.className = "sheet-row" + (isNew ? " is-editing" : "");
         tr.setAttribute("data-id", txData.id ? String(txData.id) : "");
         tr.setAttribute("data-client-id", txData.client ? String(txData.client) : "");
+        tr.setAttribute("data-vertical-id", txData.vertical_id ? String(txData.vertical_id) : "");
         tr.setAttribute("data-dirty", isNew ? "true" : "false");
 
         var dateVal = txData.date || todayISO();
-        var verticalVal = txData.vertical || "";
         var typeVal = txData.transaction_type || "INGRESO";
         if (typeVal === "EGRESO") typeVal = "GASTO";
         var conceptVal = txData.concept || "";
@@ -454,7 +543,9 @@
                 '<input type="date" name="date" class="sheet-input" value="' + dateVal + '" ' + disabledAttr + ' required aria-label="Fecha">' +
             "</td>" +
             '<td class="cell-vertical">' +
-                '<input type="text" name="vertical" class="sheet-input" maxlength="120" placeholder="Unidad de negocio" ' + disabledAttr + ' aria-label="Vertical">' +
+                '<select name="vertical" class="sheet-select" ' + disabledAttr + ' aria-label="Vertical">' +
+                    buildVerticalOptionsHTML(txData, isNew) +
+                "</select>" +
             "</td>" +
             '<td class="cell-type">' +
                 '<select name="transaction_type" class="sheet-select" ' + disabledAttr + ' aria-label="Tipo">' +
@@ -487,8 +578,6 @@
                 "</div>" +
             "</td>";
 
-        var verticalInput = tr.querySelector("input[name='vertical']");
-        if (verticalInput) verticalInput.value = verticalVal;
         var conceptInput = tr.querySelector("input[name='concept']");
         if (conceptInput) conceptInput.value = conceptVal;
         var clientInput = tr.querySelector("input[name='client']");
@@ -516,7 +605,7 @@
     function extractRowPayload(tr) {
         var idVal = tr.getAttribute("data-id") || "";
         var dateInput = tr.querySelector("input[name='date']");
-        var verticalInput = tr.querySelector("input[name='vertical']");
+        var verticalSelect = tr.querySelector("select[name='vertical']");
         var typeSelect = tr.querySelector("select[name='transaction_type']");
         var conceptInput = tr.querySelector("input[name='concept']");
         var clientInput = tr.querySelector("input[name='client']");
@@ -527,7 +616,7 @@
         return {
             id: idVal ? parseInt(idVal, 10) : null,
             date: dateInput ? dateInput.value.trim() : "",
-            vertical: verticalInput ? verticalInput.value.trim() : "",
+            vertical: verticalSelect ? verticalSelect.value.trim() : "",
             transaction_type: typeSelect ? typeSelect.value : "INGRESO",
             concept: conceptInput ? conceptInput.value.trim() : "",
             client: clientInput ? clientInput.value.trim() : "",
@@ -546,6 +635,7 @@
                     id: "",
                     date: todayISO(),
                     vertical: "",
+                    vertical_id: "",
                     transaction_type: "INGRESO",
                     concept: "",
                     client: "",
@@ -562,7 +652,7 @@
                 tbody.appendChild(newRow);
             }
             updateDirtyCounter();
-            var verticalField = newRow.querySelector("input[name='vertical']");
+            var verticalField = newRow.querySelector("select[name='vertical']");
             if (verticalField) {
                 verticalField.focus();
             }
@@ -706,6 +796,9 @@
                 if (Array.isArray(result.data.clients)) {
                     updateClientsDatalist(result.data.clients);
                 }
+                if (Array.isArray(result.data.active_verticals)) {
+                    activeVerticals = result.data.active_verticals;
+                }
                 if (Array.isArray(result.data.transactions)) {
                     renderAllRows(result.data.transactions);
                 }
@@ -761,6 +854,9 @@
                 if (Array.isArray(result.data.clients)) {
                     updateClientsDatalist(result.data.clients);
                 }
+                if (Array.isArray(result.data.active_verticals)) {
+                    activeVerticals = result.data.active_verticals;
+                }
                 if (Array.isArray(result.data.transactions)) {
                     renderAllRows(result.data.transactions);
                 }
@@ -772,6 +868,77 @@
             .catch(function () {
                 if (uploadBtn) uploadBtn.disabled = false;
                 showBanner("Error de red durante la carga del archivo.", true);
+            });
+        });
+    }
+
+    // 4.b Formulario de exportación por rango de fechas (Excel en memoria vía Fetch API)
+    if (exportForm) {
+        exportForm.addEventListener("submit", function (event) {
+            event.preventDefault();
+            var startDate = exportStartInput ? exportStartInput.value.trim() : "";
+            var endDate = exportEndInput ? exportEndInput.value.trim() : "";
+
+            if (!startDate || !endDate) {
+                showBanner("Error de validación: Debe seleccionar las fechas 'Desde' y 'Hasta' para exportar.", true);
+                return;
+            }
+            if (startDate > endDate) {
+                showBanner("Error de validación: La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.", true);
+                return;
+            }
+
+            var exportEndpoint = exportForm.getAttribute("action") || "/transacciones/exportar/";
+            var exportUrl =
+                exportEndpoint +
+                "?fecha_desde=" +
+                encodeURIComponent(startDate) +
+                "&fecha_hasta=" +
+                encodeURIComponent(endDate);
+
+            if (exportBtn) exportBtn.disabled = true;
+
+            fetch(exportUrl, {
+                method: "GET",
+                headers: {
+                    "X-Requested-With": "XMLHttpRequest"
+                }
+            })
+            .then(function (res) {
+                var contentType = res.headers.get("Content-Type") || "";
+                if (!res.ok || contentType.indexOf("application/json") !== -1) {
+                    return res.json().then(function (errData) {
+                        throw new Error(errData.message || "Error al exportar las transacciones.");
+                    });
+                }
+                var disposition = res.headers.get("Content-Disposition") || "";
+                var filename = "transacciones_" + startDate + "_a_" + endDate + ".xlsx";
+                var match = disposition.match(/filename="?([^";]+)"?/i);
+                if (match && match[1]) {
+                    filename = match[1];
+                }
+                return res.blob().then(function (blob) {
+                    return { blob: blob, filename: filename };
+                });
+            })
+            .then(function (fileResult) {
+                if (exportBtn) exportBtn.disabled = false;
+                var downloadUrl = window.URL.createObjectURL(fileResult.blob);
+                var link = document.createElement("a");
+                link.href = downloadUrl;
+                link.download = fileResult.filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                window.URL.revokeObjectURL(downloadUrl);
+                showBanner(
+                    "Exportación completada: archivo descargado para el período " + startDate + " a " + endDate + ".",
+                    false
+                );
+            })
+            .catch(function (err) {
+                if (exportBtn) exportBtn.disabled = false;
+                showBanner(err.message || "Error de red al exportar las transacciones.", true);
             });
         });
     }
