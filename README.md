@@ -109,3 +109,18 @@ Al iniciar, el contenedor `web` ejecutará automáticamente:
   ```bash
   docker compose down
   ```
+
+## Desarrollo y despliegue a prodcción
+  ```bash
+  git checkout -b feature_rama_nueva
+  git add .
+  git commit -m "comentario descriptivo"
+  git push -u origin feature_rama_nueva
+  ```
+Los PRs son SI O SI de feature_rama_nueva -> development -> main, luego conectarse al directorio remoto
+```bash
+# Una vez conectado al directorio remoto
+cd nombre_repositorio
+git pull origin main
+docker compose up -d --build
+  ```
