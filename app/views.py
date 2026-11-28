@@ -38,6 +38,7 @@ from django.utils.http import urlsafe_base64_decode
 from django.views.decorators.http import require_http_methods
 
 from .forms import (
+    ClienteBulkUploadForm,
     ClienteForm,
     CustomAuthenticationForm,
     CustomPasswordResetForm,
@@ -46,6 +47,7 @@ from .forms import (
     ResendActivationForm,
     TransactionBulkUploadForm,
     TransactionForm,
+    VerticalBulkUploadForm,
     VerticalForm,
 )
 from .models import (
@@ -513,14 +515,293 @@ def _paginate_user_clientes(user, page=1, per_page=DEFAULT_PAGE_SIZE):
     return page_obj, pagination_meta
 
 
+XLSX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+CLIENT_SPREADSHEET_COLUMNS = [
+    "Nombre Completo",
+    "Email",
+    "Teléfono",
+    "Sexo",
+]
+
+VERTICAL_SPREADSHEET_COLUMNS = [
+    "Título",
+    "Descripción",
+]
+
+
+def _build_simple_excel_bytes(rows_data, columns, sheet_name="Datos"):
+    """
+    Construye un archivo Excel (.xlsx) estrictamente en memoria (io.BytesIO + pandas/openpyxl)
+    con las columnas indicadas y libera inmediatamente el DataFrame y el buffer de RAM.
+    """
+    buffer = io.BytesIO()
+    df = pd.DataFrame(rows_data, columns=list(columns))
+    try:
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+        return buffer.getvalue()
+    finally:
+        del df
+        buffer.close()
+        del buffer
+        gc.collect()
+
+
+def _module_export_error_response(request, message, redirect_to, status=400):
+    """
+    Devuelve una respuesta de error de validación en JSON cuando la petición proviene
+    de Fetch API / AJAX, o redirige al módulo correspondiente con un mensaje en caso contrario.
+    """
+    is_ajax = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in request.headers.get("Accept", "")
+    )
+    if is_ajax:
+        return JsonResponse({"status": "error", "message": message}, status=status)
+    messages.error(request, message)
+    return redirect(redirect_to)
+
+
+def _process_in_memory_clients_spreadsheet(uploaded_file, user):
+    """
+    Procesa un archivo CSV o Excel de Clientes estrictamente en memoria (io.BytesIO + pandas)
+    con las columnas: Nombre Completo, Email, Teléfono, Sexo.
+    Libera inmediatamente el DataFrame y el buffer de RAM.
+    """
+    raw_bytes = uploaded_file.read()
+    buffer = io.BytesIO(raw_bytes)
+    uploaded_file.close()
+    df = None
+
+    try:
+        filename = (uploaded_file.name or "").lower().strip()
+        if filename.endswith(".csv"):
+            df = pd.read_csv(buffer, dtype=str, keep_default_na=False)
+            if len(df.columns) == 1 and ";" in str(df.columns[0]):
+                buffer.seek(0)
+                df = pd.read_csv(buffer, sep=";", dtype=str, keep_default_na=False)
+        else:
+            df = pd.read_excel(buffer, dtype=str, keep_default_na=False, engine="openpyxl")
+
+        if df is None or df.empty:
+            raise ValueError("El archivo no contiene filas para procesar.")
+
+        col_map = {}
+        aliases = {
+            "nombre_completo": {
+                "nombre_completo",
+                "nombre",
+                "cliente",
+                "name",
+                "full_name",
+                "razon_social",
+                "nombre_y_apellido",
+            },
+            "email": {
+                "email",
+                "correo",
+                "correo_electronico",
+                "mail",
+                "e_mail",
+            },
+            "telefono": {
+                "telefono",
+                "tel",
+                "phone",
+                "celular",
+                "movil",
+                "contacto",
+            },
+            "sexo": {
+                "sexo",
+                "sex",
+                "genero",
+                "gender",
+            },
+        }
+        for orig_col in df.columns:
+            norm_col = _normalize_header(orig_col)
+            for target_field, valid_names in aliases.items():
+                if norm_col in valid_names and target_field not in col_map:
+                    col_map[target_field] = orig_col
+
+        if "nombre_completo" not in col_map:
+            raise ValueError(
+                "Error de validación: El archivo debe incluir al menos la columna "
+                "Nombre Completo (junto con Email, Teléfono y Sexo)."
+            )
+
+        created_clients = []
+        with db_transaction.atomic():
+            for idx, row in df.iterrows():
+                row_num = idx + 2
+                raw_name = str(row[col_map["nombre_completo"]]).strip()
+                raw_email = (
+                    str(row[col_map["email"]]).strip()
+                    if "email" in col_map
+                    else ""
+                )
+                raw_phone = (
+                    str(row[col_map["telefono"]]).strip()
+                    if "telefono" in col_map
+                    else ""
+                )
+                raw_sex = (
+                    str(row[col_map["sexo"]]).strip()
+                    if "sexo" in col_map
+                    else ""
+                )
+
+                if raw_name.lower() in ("nan", "none"):
+                    raw_name = ""
+                if raw_email.lower() in ("nan", "none", "-"):
+                    raw_email = ""
+                if raw_phone.lower() in ("nan", "none", "-"):
+                    raw_phone = ""
+                if raw_sex.lower() in ("nan", "none", "-"):
+                    raw_sex = ""
+
+                if not any((raw_name, raw_email, raw_phone, raw_sex)):
+                    continue
+
+                if not raw_name:
+                    raise ValueError(
+                        f"Fila {row_num}: El nombre completo del cliente es obligatorio."
+                    )
+
+                norm_sex = raw_sex.upper()
+                if norm_sex in ("", "OTRO", "OTROS", "X"):
+                    parsed_sex = Cliente.Sexo.OTRO
+                elif norm_sex in ("M", "MASCULINO", "H", "HOMBRE"):
+                    parsed_sex = Cliente.Sexo.MASCULINO
+                elif norm_sex in ("F", "FEMENINO", "MUJER"):
+                    parsed_sex = Cliente.Sexo.FEMENINO
+                else:
+                    raise ValueError(
+                        f"Fila {row_num}: Sexo inválido '{raw_sex}' (use M, F u Otro)."
+                    )
+
+                form = ClienteForm(
+                    data={
+                        "nombre_completo": raw_name,
+                        "email": raw_email,
+                        "telefono": raw_phone,
+                        "sexo": parsed_sex,
+                    },
+                    user=user,
+                )
+                if not form.is_valid():
+                    err_detail = "; ".join(
+                        f"{', '.join(errs)}" for _, errs in form.errors.items()
+                    )
+                    raise ValueError(f"Fila {row_num}: {err_detail}")
+
+                created_clients.append(form.save())
+
+            if not created_clients:
+                raise ValueError("No se encontraron registros válidos en el archivo.")
+
+        return created_clients
+    finally:
+        if df is not None:
+            del df
+        buffer.close()
+        del buffer
+        del raw_bytes
+        gc.collect()
+
+
+@login_required
+@require_http_methods(["GET"])
+def clients_template_view(request):
+    """
+    Genera y descarga en memoria una plantilla Excel (.xlsx) con las 4 cabeceras
+    esperadas por el importador de Clientes y filas guía de ejemplo.
+    """
+    sample_rows = [
+        {
+            "Nombre Completo": "Cliente Ejemplo S.A.",
+            "Email": "contacto@clienteejemplo.com",
+            "Teléfono": "+54 9 11 4000-0000",
+            "Sexo": "Otro",
+        },
+        {
+            "Nombre Completo": "María González",
+            "Email": "maria.gonzalez@empresa.com",
+            "Teléfono": "+54 9 11 5000-0000",
+            "Sexo": "F",
+        },
+    ]
+    excel_bytes = _build_simple_excel_bytes(
+        sample_rows,
+        columns=CLIENT_SPREADSHEET_COLUMNS,
+        sheet_name="Plantilla",
+    )
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = (
+        'attachment; filename="plantilla_clientes.xlsx"'
+    )
+    return response
+
+
+@login_required
+@require_http_methods(["GET"])
+def clients_export_view(request):
+    """
+    Exporta la cartera de clientes del usuario autenticado en un archivo `.xlsx`
+    en memoria 100% compatible con el flujo de importación.
+    """
+    qs = Cliente.objects.filter(user=request.user).order_by(
+        "nombre_completo", "id"
+    )
+    rows_data = [
+        {
+            "Nombre Completo": c.nombre_completo,
+            "Email": c.email or "",
+            "Teléfono": c.telefono or "",
+            "Sexo": c.sexo or Cliente.Sexo.OTRO,
+        }
+        for c in qs
+    ]
+
+    if not rows_data:
+        return _module_export_error_response(
+            request,
+            "No se encontraron clientes registrados para exportar.",
+            redirect_to="app:clients",
+            status=404,
+        )
+
+    excel_bytes = _build_simple_excel_bytes(
+        rows_data,
+        columns=CLIENT_SPREADSHEET_COLUMNS,
+        sheet_name="Clientes",
+    )
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = (
+        'attachment; filename="clientes_exportados.xlsx"'
+    )
+    return response
+
+
 @login_required
 @require_http_methods(["GET", "POST"])
 def clients_view(request):
     """
     Lista los clientes del usuario y procesa peticiones POST (crear, editar,
-    subir PDF individual o eliminar clientes) validando extensión .pdf y límite de 10 MB.
+    subir PDF individual, eliminar o importar CSV/Excel en memoria) validando
+    extensión .pdf y límite de 10 MB para documentación y 5 MB para planillas.
     """
     if request.method == "GET":
+        download_mode = (request.GET.get("download") or "").strip().lower()
+        if download_mode == "template":
+            return clients_template_view(request)
+        if download_mode == "export":
+            return clients_export_view(request)
+
         page, per_page = _parse_pagination_params(request.GET)
         page_obj, pagination_meta = _paginate_user_clientes(
             request.user, page=page, per_page=per_page
@@ -541,6 +822,7 @@ def clients_view(request):
             )
 
         form = ClienteForm(user=request.user)
+        upload_form = ClienteBulkUploadForm()
         return render(
             request,
             "app/clientes.html",
@@ -551,6 +833,7 @@ def clients_view(request):
                 "per_page": per_page,
                 "allowed_page_sizes": ALLOWED_PAGE_SIZES,
                 "form": form,
+                "upload_form": upload_form,
             },
         )
 
@@ -566,7 +849,45 @@ def clients_view(request):
         payload = request.POST.dict()
 
     page, per_page = _parse_pagination_params(payload, request.GET)
-    action = payload.get("action") or "create"
+    action = payload.get("action") or (
+        "bulk_upload" if "file" in request.FILES else "create"
+    )
+
+    # 0. Subida masiva en memoria (CSV / Excel con pandas)
+    if action == "bulk_upload":
+        upload_form = ClienteBulkUploadForm(request.POST, request.FILES)
+        if not upload_form.is_valid():
+            error_msg = " ".join(
+                err for errs in upload_form.errors.values() for err in errs
+            )
+            return JsonResponse(
+                {"status": "error", "message": error_msg, "errors": upload_form.errors},
+                status=400,
+            )
+        try:
+            created_records = _process_in_memory_clients_spreadsheet(
+                upload_form.cleaned_data["file"], request.user
+            )
+        except Exception as exc:
+            return JsonResponse(
+                {"status": "error", "message": str(exc)},
+                status=400,
+            )
+
+        page_obj, pagination_meta = _paginate_user_clientes(
+            request.user, page=1, per_page=per_page
+        )
+        return JsonResponse(
+            {
+                "status": "ok",
+                "message": f"Ingesta completada: {len(created_records)} clientes procesados en memoria.",
+                "imported_count": len(created_records),
+                "clientes": [
+                    _serialize_cliente(c) for c in page_obj.object_list
+                ],
+                "pagination": pagination_meta,
+            }
+        )
 
     # 1. Eliminación de cliente
     if action == "delete":
@@ -789,14 +1110,195 @@ def _paginate_user_verticals(user, page=1, per_page=DEFAULT_PAGE_SIZE):
     return page_obj, pagination_meta
 
 
+def _process_in_memory_verticals_spreadsheet(uploaded_file, user):
+    """
+    Procesa un archivo CSV o Excel de Verticales estrictamente en memoria (io.BytesIO + pandas)
+    con las columnas: Título, Descripción.
+    Aplica las reglas de unicidad de verticales activas y reactivación controlada,
+    y libera inmediatamente el DataFrame y el buffer de RAM.
+    """
+    raw_bytes = uploaded_file.read()
+    buffer = io.BytesIO(raw_bytes)
+    uploaded_file.close()
+    df = None
+
+    try:
+        filename = (uploaded_file.name or "").lower().strip()
+        if filename.endswith(".csv"):
+            df = pd.read_csv(buffer, dtype=str, keep_default_na=False)
+            if len(df.columns) == 1 and ";" in str(df.columns[0]):
+                buffer.seek(0)
+                df = pd.read_csv(buffer, sep=";", dtype=str, keep_default_na=False)
+        else:
+            df = pd.read_excel(buffer, dtype=str, keep_default_na=False, engine="openpyxl")
+
+        if df is None or df.empty:
+            raise ValueError("El archivo no contiene filas para procesar.")
+
+        col_map = {}
+        aliases = {
+            "title": {
+                "titulo",
+                "title",
+                "vertical",
+                "nombre",
+                "unidad",
+                "unidad_de_negocio",
+            },
+            "description": {
+                "descripcion",
+                "description",
+                "detalle",
+                "detail",
+                "observacion",
+            },
+        }
+        for orig_col in df.columns:
+            norm_col = _normalize_header(orig_col)
+            for target_field, valid_names in aliases.items():
+                if norm_col in valid_names and target_field not in col_map:
+                    col_map[target_field] = orig_col
+
+        if "title" not in col_map:
+            raise ValueError(
+                "Error de validación: El archivo debe incluir al menos la columna "
+                "Título (junto con Descripción)."
+            )
+
+        processed_verticals = []
+        with db_transaction.atomic():
+            for idx, row in df.iterrows():
+                row_num = idx + 2
+                raw_title = str(row[col_map["title"]]).strip()
+                raw_desc = (
+                    str(row[col_map["description"]]).strip()
+                    if "description" in col_map
+                    else ""
+                )
+
+                if raw_title.lower() in ("nan", "none"):
+                    raw_title = ""
+                if raw_desc.lower() in ("nan", "none", "-"):
+                    raw_desc = ""
+
+                if not any((raw_title, raw_desc)):
+                    continue
+
+                if not raw_title:
+                    raise ValueError(
+                        f"Fila {row_num}: El título de la vertical es obligatorio."
+                    )
+
+                form = VerticalForm(
+                    data={
+                        "title": raw_title,
+                        "description": raw_desc,
+                    },
+                    user=user,
+                )
+                if not form.is_valid():
+                    err_detail = "; ".join(
+                        f"{', '.join(errs)}" for _, errs in form.errors.items()
+                    )
+                    raise ValueError(f"Fila {row_num}: {err_detail}")
+
+                processed_verticals.append(form.save())
+
+            if not processed_verticals:
+                raise ValueError("No se encontraron registros válidos en el archivo.")
+
+        return processed_verticals
+    finally:
+        if df is not None:
+            del df
+        buffer.close()
+        del buffer
+        del raw_bytes
+        gc.collect()
+
+
+@login_required
+@require_http_methods(["GET"])
+def verticals_template_view(request):
+    """
+    Genera y descarga en memoria una plantilla Excel (.xlsx) con las 2 cabeceras
+    esperadas por el importador de Verticales y filas guía de ejemplo.
+    """
+    sample_rows = [
+        {
+            "Título": "Consultoría Financiera",
+            "Descripción": "Asesoramiento y planificación de flujo de caja (fila guía de ejemplo)",
+        },
+        {
+            "Título": "Operaciones Digitales",
+            "Descripción": "Servicios recurrentes y suscripciones (fila guía de ejemplo)",
+        },
+    ]
+    excel_bytes = _build_simple_excel_bytes(
+        sample_rows,
+        columns=VERTICAL_SPREADSHEET_COLUMNS,
+        sheet_name="Plantilla",
+    )
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = (
+        'attachment; filename="plantilla_verticales.xlsx"'
+    )
+    return response
+
+
+@login_required
+@require_http_methods(["GET"])
+def verticals_export_view(request):
+    """
+    Exporta las verticales de negocio activas del usuario autenticado en un archivo `.xlsx`
+    en memoria 100% compatible con el flujo de importación.
+    """
+    qs = Vertical.objects.filter(user=request.user, is_active=True).order_by(
+        "title", "id"
+    )
+    rows_data = [
+        {
+            "Título": v.title,
+            "Descripción": v.description or "",
+        }
+        for v in qs
+    ]
+
+    if not rows_data:
+        return _module_export_error_response(
+            request,
+            "No se encontraron verticales activas registradas para exportar.",
+            redirect_to="app:verticals",
+            status=404,
+        )
+
+    excel_bytes = _build_simple_excel_bytes(
+        rows_data,
+        columns=VERTICAL_SPREADSHEET_COLUMNS,
+        sheet_name="Verticales",
+    )
+    response = HttpResponse(excel_bytes, content_type=XLSX_CONTENT_TYPE)
+    response["Content-Disposition"] = (
+        'attachment; filename="verticales_exportadas.xlsx"'
+    )
+    return response
+
+
 @login_required
 @require_http_methods(["GET", "POST"])
 def verticals_view(request):
     """
     Lista exclusivamente las verticales activas del usuario y procesa peticiones POST
-    (alta de vertical o baja lógica con is_active=False) dentro de transaction.atomic().
+    (alta de vertical, baja lógica con is_active=False, edición en lote o importación
+    masiva CSV/Excel en memoria) dentro de transaction.atomic().
     """
     if request.method == "GET":
+        download_mode = (request.GET.get("download") or "").strip().lower()
+        if download_mode == "template":
+            return verticals_template_view(request)
+        if download_mode == "export":
+            return verticals_export_view(request)
+
         page, per_page = _parse_pagination_params(request.GET)
         page_obj, pagination_meta = _paginate_user_verticals(
             request.user, page=page, per_page=per_page
@@ -817,6 +1319,7 @@ def verticals_view(request):
             )
 
         form = VerticalForm(user=request.user)
+        upload_form = VerticalBulkUploadForm()
         return render(
             request,
             "app/verticals.html",
@@ -827,6 +1330,7 @@ def verticals_view(request):
                 "per_page": per_page,
                 "allowed_page_sizes": ALLOWED_PAGE_SIZES,
                 "form": form,
+                "upload_form": upload_form,
             },
         )
 
@@ -843,7 +1347,45 @@ def verticals_view(request):
         payload = request.POST.dict()
 
     page, per_page = _parse_pagination_params(payload, request.GET)
-    action = payload.get("action") or "create"
+    action = payload.get("action") or (
+        "bulk_upload" if "file" in request.FILES else "create"
+    )
+
+    # 0. Subida masiva en memoria (CSV / Excel con pandas)
+    if action == "bulk_upload":
+        upload_form = VerticalBulkUploadForm(request.POST, request.FILES)
+        if not upload_form.is_valid():
+            error_msg = " ".join(
+                err for errs in upload_form.errors.values() for err in errs
+            )
+            return JsonResponse(
+                {"status": "error", "message": error_msg, "errors": upload_form.errors},
+                status=400,
+            )
+        try:
+            created_records = _process_in_memory_verticals_spreadsheet(
+                upload_form.cleaned_data["file"], request.user
+            )
+        except Exception as exc:
+            return JsonResponse(
+                {"status": "error", "message": str(exc)},
+                status=400,
+            )
+
+        page_obj, pagination_meta = _paginate_user_verticals(
+            request.user, page=1, per_page=per_page
+        )
+        return JsonResponse(
+            {
+                "status": "ok",
+                "message": f"Ingesta completada: {len(created_records)} verticales procesadas en memoria.",
+                "imported_count": len(created_records),
+                "verticals": [
+                    _serialize_vertical(v) for v in page_obj.object_list
+                ],
+                "pagination": pagination_meta,
+            }
+        )
 
     # 1. Baja lógica de vertical (nunca se elimina físicamente de la base de datos)
     if action in ("deactivate", "delete"):

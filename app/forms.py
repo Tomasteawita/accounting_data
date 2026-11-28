@@ -838,3 +838,36 @@ class TransactionBulkUploadForm(forms.Form):
                 "Formato no admitido. Utilice exclusivamente archivos .csv o .xlsx."
             )
         return uploaded
+
+
+class ClienteBulkUploadForm(TransactionBulkUploadForm):
+    """
+    Formulario para validar la carga masiva en memoria de Clientes vía CSV o Excel (máx. 5 MB).
+    """
+
+    file = forms.FileField(
+        label="Archivo de clientes (.csv, .xlsx)",
+        widget=forms.ClearableFileInput(
+            attrs={
+                "class": "form-input file-input-stoic",
+                "accept": ".csv,.xlsx,.xls",
+            }
+        ),
+    )
+
+
+class VerticalBulkUploadForm(TransactionBulkUploadForm):
+    """
+    Formulario para validar la carga masiva en memoria de Verticales vía CSV o Excel (máx. 5 MB).
+    """
+
+    file = forms.FileField(
+        label="Archivo de verticales (.csv, .xlsx)",
+        widget=forms.ClearableFileInput(
+            attrs={
+                "class": "form-input file-input-stoic",
+                "accept": ".csv,.xlsx,.xls",
+            }
+        ),
+    )
+
